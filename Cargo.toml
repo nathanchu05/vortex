@@ -314,6 +314,50 @@ unwrap_in_result = "deny"
 unwrap_used = "deny"
 use_debug = "deny"
 
+[patch.crates-io]
+# DataDog patches to ensure vortex uses the same DataFusion & Arrow versions as dd-source
+# These MUST match dd-source/Cargo.toml exactly to avoid dependency conflicts
+# When dd-source updates their DataFusion fork, update these revisions to match
+
+# DataFusion patches - all point to DataDog's fork
+datafusion = { git = "https://github.com/DataDog/datafusion", rev = "cd8087121c9eed1e386928ad0a05fa3391254e6e", package = "datafusion" }
+datafusion-catalog = { git = "https://github.com/DataDog/datafusion", rev = "cd8087121c9eed1e386928ad0a05fa3391254e6e", package = "datafusion-catalog" }
+datafusion-common = { git = "https://github.com/DataDog/datafusion", rev = "cd8087121c9eed1e386928ad0a05fa3391254e6e", package = "datafusion-common" }
+datafusion-common-runtime = { git = "https://github.com/DataDog/datafusion", rev = "cd8087121c9eed1e386928ad0a05fa3391254e6e", package = "datafusion-common-runtime" }
+datafusion-datasource = { git = "https://github.com/DataDog/datafusion", rev = "cd8087121c9eed1e386928ad0a05fa3391254e6e", package = "datafusion-datasource" }
+datafusion-doc = { git = "https://github.com/DataDog/datafusion", rev = "cd8087121c9eed1e386928ad0a05fa3391254e6e", package = "datafusion-doc" }
+datafusion-execution = { git = "https://github.com/DataDog/datafusion", rev = "cd8087121c9eed1e386928ad0a05fa3391254e6e", package = "datafusion-execution" }
+datafusion-expr = { git = "https://github.com/DataDog/datafusion", rev = "cd8087121c9eed1e386928ad0a05fa3391254e6e", package = "datafusion-expr" }
+datafusion-functions = { git = "https://github.com/DataDog/datafusion", rev = "cd8087121c9eed1e386928ad0a05fa3391254e6e", package = "datafusion-functions" }
+datafusion-macros = { git = "https://github.com/DataDog/datafusion", rev = "cd8087121c9eed1e386928ad0a05fa3391254e6e", package = "datafusion-macros" }
+datafusion-physical-expr = { git = "https://github.com/DataDog/datafusion", rev = "cd8087121c9eed1e386928ad0a05fa3391254e6e", package = "datafusion-physical-expr" }
+datafusion-physical-expr-adapter = { git = "https://github.com/DataDog/datafusion", rev = "cd8087121c9eed1e386928ad0a05fa3391254e6e", package = "datafusion-physical-expr-adapter" }
+datafusion-physical-expr-common = { git = "https://github.com/DataDog/datafusion", rev = "cd8087121c9eed1e386928ad0a05fa3391254e6e", package = "datafusion-physical-expr-common" }
+datafusion-physical-plan = { git = "https://github.com/DataDog/datafusion", rev = "cd8087121c9eed1e386928ad0a05fa3391254e6e", package = "datafusion-physical-plan" }
+datafusion-proto = { git = "https://github.com/DataDog/datafusion", rev = "cd8087121c9eed1e386928ad0a05fa3391254e6e", package = "datafusion-proto" }
+datafusion-proto-common = { git = "https://github.com/DataDog/datafusion", rev = "cd8087121c9eed1e386928ad0a05fa3391254e6e", package = "datafusion-proto-common" }
+datafusion-pruning = { git = "https://github.com/DataDog/datafusion", rev = "cd8087121c9eed1e386928ad0a05fa3391254e6e", package = "datafusion-pruning" }
+datafusion-session = { git = "https://github.com/DataDog/datafusion", rev = "cd8087121c9eed1e386928ad0a05fa3391254e6e", package = "datafusion-session" }
+datafusion-substrait = { git = "https://github.com/DataDog/datafusion", rev = "cd8087121c9eed1e386928ad0a05fa3391254e6e", package = "datafusion-substrait" }
+
+# Arrow patches - DataFusion depends on Arrow, so we need matching versions from DataDog's fork
+arrow = { git = "https://github.com/DataDog/arrow-rs", rev = "dd2c5a10fd433374c896d62e9e4fee92b4717a7e", package = "arrow" }
+arrow-arith = { git = "https://github.com/DataDog/arrow-rs", rev = "dd2c5a10fd433374c896d62e9e4fee92b4717a7e", package = "arrow-arith" }
+arrow-array = { git = "https://github.com/DataDog/arrow-rs", rev = "dd2c5a10fd433374c896d62e9e4fee92b4717a7e", package = "arrow-array" }
+arrow-avro = { git = "https://github.com/DataDog/arrow-rs", rev = "dd2c5a10fd433374c896d62e9e4fee92b4717a7e", package = "arrow-avro" }
+arrow-buffer = { git = "https://github.com/DataDog/arrow-rs", rev = "dd2c5a10fd433374c896d62e9e4fee92b4717a7e", package = "arrow-buffer" }
+arrow-cast = { git = "https://github.com/DataDog/arrow-rs", rev = "dd2c5a10fd433374c896d62e9e4fee92b4717a7e", package = "arrow-cast" }
+arrow-data = { git = "https://github.com/DataDog/arrow-rs", rev = "dd2c5a10fd433374c896d62e9e4fee92b4717a7e", package = "arrow-data" }
+arrow-flight = { git = "https://github.com/DataDog/arrow-rs", rev = "dd2c5a10fd433374c896d62e9e4fee92b4717a7e", package = "arrow-flight" }
+arrow-ipc = { git = "https://github.com/DataDog/arrow-rs", rev = "dd2c5a10fd433374c896d62e9e4fee92b4717a7e", package = "arrow-ipc" }
+arrow-json = { git = "https://github.com/DataDog/arrow-rs", rev = "dd2c5a10fd433374c896d62e9e4fee92b4717a7e", package = "arrow-json" }
+arrow-ord = { git = "https://github.com/DataDog/arrow-rs", rev = "dd2c5a10fd433374c896d62e9e4fee92b4717a7e", package = "arrow-ord" }
+arrow-row = { git = "https://github.com/DataDog/arrow-rs", rev = "dd2c5a10fd433374c896d62e9e4fee92b4717a7e", package = "arrow-row" }
+arrow-schema = { git = "https://github.com/DataDog/arrow-rs", rev = "dd2c5a10fd433374c896d62e9e4fee92b4717a7e", package = "arrow-schema" }
+arrow-select = { git = "https://github.com/DataDog/arrow-rs", rev = "dd2c5a10fd433374c896d62e9e4fee92b4717a7e", package = "arrow-select" }
+arrow-string = { git = "https://github.com/DataDog/arrow-rs", rev = "dd2c5a10fd433374c896d62e9e4fee92b4717a7e", package = "arrow-string" }
+parquet = { git = "https://github.com/DataDog/arrow-rs", rev = "dd2c5a10fd433374c896d62e9e4fee92b4717a7e", package = "parquet" }
+
 [profile.release]
 codegen-units = 1
 # Turn LTO off, as it breaks when vortex-duckdb-ext is linked.
