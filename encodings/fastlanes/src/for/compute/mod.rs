@@ -8,43 +8,41 @@ mod is_sorted;
 
 use vortex_array::Array;
 use vortex_array::ArrayRef;
+use vortex_array::ExecutionCtx;
 use vortex_array::IntoArray;
-use vortex_array::compute::FilterKernel;
-use vortex_array::compute::FilterKernelAdapter;
-use vortex_array::compute::TakeKernel;
-use vortex_array::compute::TakeKernelAdapter;
-use vortex_array::compute::filter;
-use vortex_array::compute::take;
-use vortex_array::register_kernel;
+use vortex_array::arrays::FilterReduce;
+use vortex_array::arrays::TakeExecute;
 use vortex_error::VortexResult;
 use vortex_mask::Mask;
 
 use crate::FoRArray;
 use crate::FoRVTable;
 
-impl TakeKernel for FoRVTable {
-    fn take(&self, array: &FoRArray, indices: &dyn Array) -> VortexResult<ArrayRef> {
-        FoRArray::try_new(
-            take(array.encoded(), indices)?,
-            array.reference_scalar().clone(),
-        )
-        .map(|a| a.into_array())
+impl TakeExecute for FoRVTable {
+    fn take(
+        array: &FoRArray,
+        indices: &dyn Array,
+        _ctx: &mut ExecutionCtx,
+    ) -> VortexResult<Option<ArrayRef>> {
+        Ok(Some(
+            FoRArray::try_new(
+                array.encoded().take(indices.to_array())?,
+                array.reference_scalar().clone(),
+            )?
+            .into_array(),
+        ))
     }
 }
 
-register_kernel!(TakeKernelAdapter(FoRVTable).lift());
-
-impl FilterKernel for FoRVTable {
-    fn filter(&self, array: &FoRArray, mask: &Mask) -> VortexResult<ArrayRef> {
+impl FilterReduce for FoRVTable {
+    fn filter(array: &FoRArray, mask: &Mask) -> VortexResult<Option<ArrayRef>> {
         FoRArray::try_new(
-            filter(array.encoded(), mask)?,
+            array.encoded().filter(mask.clone())?,
             array.reference_scalar().clone(),
         )
-        .map(|a| a.into_array())
+        .map(|a| Some(a.into_array()))
     }
 }
-
-register_kernel!(FilterKernelAdapter(FoRVTable).lift());
 
 #[cfg(test)]
 mod test {

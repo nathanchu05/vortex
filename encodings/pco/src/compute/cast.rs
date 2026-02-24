@@ -14,7 +14,7 @@ use crate::PcoVTable;
 
 impl CastKernel for PcoVTable {
     fn cast(&self, array: &PcoArray, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
-        if !dtype.is_nullable() || !array.all_valid() {
+        if !dtype.is_nullable() || !array.all_valid()? {
             // TODO(joe): fixme
             // We cannot cast to non-nullable since the validity containing nulls is used to decode
             // the PCO array, this would require rewriting tables.
@@ -55,7 +55,6 @@ register_kernel!(CastKernelAdapter(PcoVTable).lift());
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
-    use vortex_array::ToCanonical;
     use vortex_array::arrays::PrimitiveArray;
     use vortex_array::assert_arrays_eq;
     use vortex_array::compute::cast;
@@ -86,10 +85,10 @@ mod tests {
             &DType::Primitive(PType::F64, Nullability::NonNullable)
         );
 
-        let decoded = casted.to_primitive();
-        let f64_values = decoded.as_slice::<f64>();
-        assert_eq!(f64_values.len(), 5);
-        assert!((f64_values[0] - 1.0).abs() < f64::EPSILON);
+        assert_arrays_eq!(
+            casted,
+            PrimitiveArray::from_iter([1.0f64, 2.0, 3.0, 4.0, 5.0])
+        );
     }
 
     #[test]
@@ -119,7 +118,7 @@ mod tests {
             Validity::from_iter([true, true, true, true, true, true]),
         );
         let pco = PcoArray::from_primitive(&values, 0, 128).unwrap();
-        let sliced = pco.slice(1..5);
+        let sliced = pco.slice(1..5).unwrap();
         let casted = cast(
             sliced.as_ref(),
             &DType::Primitive(PType::U32, Nullability::NonNullable),
@@ -130,9 +129,7 @@ mod tests {
             &DType::Primitive(PType::U32, Nullability::NonNullable)
         );
         // Verify the values are correct
-        let decoded = casted.to_primitive();
-        let u32_values = decoded.as_slice::<u32>();
-        assert_eq!(u32_values, &[20, 30, 40, 50]);
+        assert_arrays_eq!(casted, PrimitiveArray::from_iter([20u32, 30, 40, 50]));
     }
 
     #[test]
@@ -146,7 +143,7 @@ mod tests {
             Some(60),
         ]);
         let pco = PcoArray::from_primitive(&values, 0, 128).unwrap();
-        let sliced = pco.slice(1..5);
+        let sliced = pco.slice(1..5).unwrap();
         let casted = cast(
             sliced.as_ref(),
             &DType::Primitive(PType::U32, Nullability::NonNullable),
@@ -156,9 +153,7 @@ mod tests {
             casted.dtype(),
             &DType::Primitive(PType::U32, Nullability::NonNullable)
         );
-        let decoded = casted.to_primitive();
-        let expected = PrimitiveArray::from_iter([20u32, 30, 40, 50]);
-        assert_arrays_eq!(decoded, expected);
+        assert_arrays_eq!(casted, PrimitiveArray::from_iter([20u32, 30, 40, 50]));
     }
 
     #[rstest]

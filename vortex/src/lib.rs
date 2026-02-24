@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 // https://github.com/rust-lang/cargo/pull/11645#issuecomment-1536905941
-#![doc = include_str!(concat!("../", env!("CARGO_PKG_README")))]
+// Commented out for Bazel compatibility - CARGO_PKG_README not available in Bazel sandbox
+// #![doc = include_str!(concat!("../", env!("CARGO_PKG_README")))]
 
 // vortex::compute is deprecated and will be ported over to expressions.
 pub use vortex_array::compute;
@@ -11,9 +12,9 @@ pub use vortex_array::compute;
 pub use vortex_array::expr;
 use vortex_array::expr::session::ExprSession;
 use vortex_array::session::ArraySession;
+use vortex_dtype::session::DTypeSession;
 use vortex_io::session::RuntimeSession;
 use vortex_layout::session::LayoutSession;
-use vortex_metrics::VortexMetrics;
 use vortex_session::VortexSession;
 
 // We re-export like so in order to allow users to search inside subcrates when using the Rust docs.
@@ -32,13 +33,13 @@ pub mod compute2 {
 
 pub mod compressor {
     pub use vortex_btrblocks::BtrBlocksCompressor;
-    #[cfg(feature = "zstd")]
-    pub use vortex_layout::layouts::compact::CompactCompressor;
+    pub use vortex_btrblocks::BtrBlocksCompressorBuilder;
 }
 
 pub mod dtype {
     pub use vortex_dtype::*;
 }
+
 pub mod error {
     pub use vortex_error::*;
 }
@@ -90,10 +91,6 @@ pub mod session {
 
 pub mod utils {
     pub use vortex_utils::*;
-}
-
-pub mod vector {
-    pub use vortex_vector::*;
 }
 
 pub mod encodings {
@@ -157,11 +154,20 @@ impl VortexSessionDefault for VortexSession {
     #[allow(unused_mut)]
     fn default() -> VortexSession {
         let mut session = VortexSession::empty()
-            .with::<VortexMetrics>()
+            .with::<DTypeSession>()
             .with::<ArraySession>()
             .with::<LayoutSession>()
             .with::<ExprSession>()
             .with::<RuntimeSession>();
+
+        #[cfg(all(feature = "cuda", target_os = "linux"))]
+        // Even if the CUDA feature is enabled we need to check at
+        // runtime whether CUDA is available in the current environment.
+        if vortex_cuda::cuda_available() {
+            use vortex_cuda::CudaSessionExt;
+            session = session.with::<vortex_cuda::CudaSession>();
+            vortex_cuda::initialize_cuda(&session.cuda_session());
+        }
 
         #[cfg(feature = "files")]
         file::register_default_encodings(&mut session);
@@ -177,7 +183,6 @@ impl VortexSessionDefault for VortexSession {
 mod test {
     use std::path::PathBuf;
 
-    use itertools::Itertools;
     use vortex_array::ArrayRef;
     use vortex_array::IntoArray;
     use vortex_array::ToCanonical;
@@ -196,7 +201,6 @@ mod test {
     use vortex_file::OpenOptionsSessionExt;
     use vortex_file::WriteOptionsSessionExt;
     use vortex_file::WriteStrategyBuilder;
-    use vortex_layout::layouts::compact::CompactCompressor;
     use vortex_session::VortexSession;
 
     use crate as vortex;
@@ -221,9 +225,12 @@ mod test {
         .build()?;
 
         let dtype = DType::from_arrow(reader.schema());
-        let chunks = reader
-            .map_ok(|record_batch| ArrayRef::from_arrow(record_batch, false))
-            .try_collect()?;
+        let chunks: Vec<_> = reader
+            .map(|record_batch| {
+                let batch = record_batch?;
+                ArrayRef::from_arrow(batch, false)
+            })
+            .collect::<VortexResult<_>>()?;
         let vortex_array = ChunkedArray::try_new(chunks, dtype)?.into_array();
         // [convert]
 
@@ -236,7 +243,6 @@ mod test {
     fn compress() -> VortexResult<()> {
         // [compress]
         use vortex::compressor::BtrBlocksCompressor;
-        use vortex::compressor::CompactCompressor;
 
         let array = PrimitiveArray::new(buffer![42u64; 100_000], Validity::NonNullable);
 
@@ -247,12 +253,6 @@ mod test {
             compressed.nbytes(),
             array.nbytes()
         );
-
-        // Or apply generally stronger compression with the compact compressor
-        let compressed = CompactCompressor::default()
-            .with_values_per_page(8192)
-            .compress(array.as_ref())?;
-        println!("Compact size: {} / {}", compressed.nbytes(), array.nbytes());
         // [compress]
 
         Ok(())
@@ -281,7 +281,7 @@ mod test {
         // [read]
         let array = session
             .open_options()
-            .open(path.clone())
+            .open_path(path.clone())
             .await?
             .scan()?
             .with_filter(gt(root(), lit(2u64)))
@@ -310,8 +310,8 @@ mod test {
         session
             .write_options()
             .with_strategy(
-                WriteStrategyBuilder::new()
-                    .with_compressor(CompactCompressor::default())
+                WriteStrategyBuilder::default()
+                    .with_compact_encodings()
                     .build(),
             )
             .write(
@@ -323,7 +323,7 @@ mod test {
         // [compact read]
         let recovered_array = session
             .open_options()
-            .open(path.clone())
+            .open_path(path.clone())
             .await?
             .scan()?
             .into_array_stream()?
@@ -333,7 +333,10 @@ mod test {
         assert_eq!(recovered_array.len(), array.len());
         let recovered_primitive = recovered_array.to_primitive();
         assert_eq!(recovered_primitive.validity(), array.validity());
-        assert_eq!(recovered_primitive.buffer::<u64>(), array.buffer::<u64>());
+        assert_eq!(
+            recovered_primitive.to_buffer::<u64>(),
+            array.to_buffer::<u64>()
+        );
 
         std::fs::remove_file(&path)?;
 
@@ -370,7 +373,7 @@ mod test {
         // Read the file back, but project down to just the "value" column.
         let projected = session
             .open_options()
-            .open(path.clone())
+            .open_path(path.clone())
             .await?
             .scan()?
             .with_projection(select(["value"], root()))

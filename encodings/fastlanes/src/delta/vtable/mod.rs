@@ -4,14 +4,13 @@
 use fastlanes::FastLanes;
 use prost::Message;
 use vortex_array::ArrayRef;
+use vortex_array::ExecutionCtx;
+use vortex_array::IntoArray;
 use vortex_array::ProstMetadata;
 use vortex_array::buffer::BufferHandle;
 use vortex_array::serde::ArrayChildren;
 use vortex_array::vtable;
 use vortex_array::vtable::ArrayId;
-use vortex_array::vtable::ArrayVTable;
-use vortex_array::vtable::ArrayVTableExt;
-use vortex_array::vtable::NotSupported;
 use vortex_array::vtable::VTable;
 use vortex_array::vtable::ValidityVTableFromChildSliceHelper;
 use vortex_dtype::DType;
@@ -20,12 +19,15 @@ use vortex_dtype::match_each_unsigned_integer_ptype;
 use vortex_error::VortexResult;
 use vortex_error::vortex_ensure;
 use vortex_error::vortex_err;
+use vortex_session::VortexSession;
 
 use crate::DeltaArray;
+use crate::delta::array::delta_decompress::delta_decompress;
 
 mod array;
-mod canonical;
 mod operations;
+mod rules;
+mod slice;
 mod validity;
 mod visitor;
 
@@ -46,19 +48,20 @@ impl VTable for DeltaVTable {
     type Metadata = ProstMetadata<DeltaMetadata>;
 
     type ArrayVTable = Self;
-    type CanonicalVTable = Self;
     type OperationsVTable = Self;
     type ValidityVTable = ValidityVTableFromChildSliceHelper;
     type VisitorVTable = Self;
-    type ComputeVTable = NotSupported;
-    type EncodeVTable = NotSupported;
 
-    fn id(&self) -> ArrayId {
-        ArrayId::new_ref("fastlanes.delta")
+    fn id(_array: &Self::Array) -> ArrayId {
+        Self::ID
     }
 
-    fn encoding(_array: &Self::Array) -> ArrayVTable {
-        DeltaVTable.as_vtable()
+    fn reduce_parent(
+        array: &Self::Array,
+        parent: &ArrayRef,
+        child_idx: usize,
+    ) -> VortexResult<Option<ArrayRef>> {
+        rules::RULES.evaluate(array, parent, child_idx)
     }
 
     fn with_children(array: &mut Self::Array, children: Vec<ArrayRef>) -> VortexResult<()> {
@@ -89,12 +92,16 @@ impl VTable for DeltaVTable {
         Ok(Some(metadata.0.encode_to_vec()))
     }
 
-    fn deserialize(buffer: &[u8]) -> VortexResult<Self::Metadata> {
-        Ok(ProstMetadata(DeltaMetadata::decode(buffer)?))
+    fn deserialize(
+        bytes: &[u8],
+        _dtype: &DType,
+        _len: usize,
+        _session: &VortexSession,
+    ) -> VortexResult<Self::Metadata> {
+        Ok(ProstMetadata(DeltaMetadata::decode(bytes)?))
     }
 
     fn build(
-        &self,
         dtype: &DType,
         len: usize,
         metadata: &Self::Metadata,
@@ -118,11 +125,17 @@ impl VTable for DeltaVTable {
         DeltaArray::try_new(bases, deltas, metadata.0.offset as usize, len)
     }
 
-    // TODO(joe): impl execute without canonical
+    fn execute(array: &Self::Array, ctx: &mut ExecutionCtx) -> VortexResult<ArrayRef> {
+        Ok(delta_decompress(array, ctx)?.into_array())
+    }
 }
 
 #[derive(Debug)]
 pub struct DeltaVTable;
+
+impl DeltaVTable {
+    pub const ID: ArrayId = ArrayId::new_ref("fastlanes.delta");
+}
 
 #[cfg(test)]
 mod tests {

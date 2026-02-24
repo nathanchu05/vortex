@@ -7,6 +7,7 @@ use std::ops::BitAnd;
 
 use vortex_dtype::Nullability;
 use vortex_dtype::match_each_decimal_value_type;
+use vortex_error::VortexResult;
 use vortex_mask::Mask;
 
 use crate::Canonical;
@@ -20,6 +21,7 @@ use crate::arrays::NullArray;
 use crate::arrays::PrimitiveArray;
 use crate::arrays::StructArray;
 use crate::arrays::VarBinViewArray;
+use crate::executor::ExecutionCtx;
 use crate::validity::Validity;
 use crate::vtable::ValidityHelper;
 
@@ -28,8 +30,12 @@ use crate::vtable::ValidityHelper;
 ///
 /// This is the core operation for MaskedArray execution - it intersects the child's
 /// validity with the provided mask, marking additional positions as invalid.
-pub fn mask_validity_canonical(canonical: Canonical, validity_mask: &Mask) -> Canonical {
-    match canonical {
+pub fn mask_validity_canonical(
+    canonical: Canonical,
+    validity_mask: &Mask,
+    ctx: &mut ExecutionCtx,
+) -> VortexResult<Canonical> {
+    Ok(match canonical {
         Canonical::Null(a) => Canonical::Null(mask_validity_null(a, validity_mask)),
         Canonical::Bool(a) => Canonical::Bool(mask_validity_bool(a, validity_mask)),
         Canonical::Primitive(a) => Canonical::Primitive(mask_validity_primitive(a, validity_mask)),
@@ -42,8 +48,10 @@ pub fn mask_validity_canonical(canonical: Canonical, validity_mask: &Mask) -> Ca
             Canonical::FixedSizeList(mask_validity_fixed_size_list(a, validity_mask))
         }
         Canonical::Struct(a) => Canonical::Struct(mask_validity_struct(a, validity_mask)),
-        Canonical::Extension(a) => Canonical::Extension(mask_validity_extension(a, validity_mask)),
-    }
+        Canonical::Extension(a) => {
+            Canonical::Extension(mask_validity_extension(a, validity_mask, ctx)?)
+        }
+    })
 }
 
 fn combine_validity(validity: &Validity, mask: &Mask, len: usize) -> Validity {
@@ -59,14 +67,21 @@ fn mask_validity_null(array: NullArray, _mask: &Mask) -> NullArray {
 fn mask_validity_bool(array: BoolArray, mask: &Mask) -> BoolArray {
     let len = array.len();
     let new_validity = combine_validity(array.validity(), mask, len);
-    BoolArray::new(array.bit_buffer().clone(), new_validity)
+    BoolArray::new(array.to_bit_buffer(), new_validity)
 }
 
 fn mask_validity_primitive(array: PrimitiveArray, mask: &Mask) -> PrimitiveArray {
     let len = array.len();
     let ptype = array.ptype();
     let new_validity = combine_validity(array.validity(), mask, len);
-    PrimitiveArray::from_byte_buffer(array.into_byte_buffer(), ptype, new_validity)
+    // SAFETY: validity has same length as values
+    unsafe {
+        PrimitiveArray::new_unchecked_from_handle(
+            array.buffer_handle().clone(),
+            ptype,
+            new_validity,
+        )
+    }
 }
 
 fn mask_validity_decimal(array: DecimalArray, mask: &Mask) -> DecimalArray {
@@ -84,12 +99,12 @@ fn mask_validity_decimal(array: DecimalArray, mask: &Mask) -> DecimalArray {
 /// Mask validity for VarBinViewArray.
 fn mask_validity_varbinview(array: VarBinViewArray, mask: &Mask) -> VarBinViewArray {
     let len = array.len();
-    let dtype = array.dtype().clone();
+    let dtype = array.dtype().as_nullable();
     let new_validity = combine_validity(array.validity(), mask, len);
     // SAFETY: We're only changing validity, not the data structure
     unsafe {
-        VarBinViewArray::new_unchecked(
-            array.views().clone(),
+        VarBinViewArray::new_handle_unchecked(
+            array.views_handle().clone(),
             array.buffers().clone(),
             dtype,
             new_validity,
@@ -124,15 +139,22 @@ fn mask_validity_fixed_size_list(array: FixedSizeListArray, mask: &Mask) -> Fixe
 fn mask_validity_struct(array: StructArray, mask: &Mask) -> StructArray {
     let len = array.len();
     let new_validity = combine_validity(array.validity(), mask, len);
-    let fields = array.fields().clone();
+    let fields = array.unmasked_fields().clone();
     let struct_fields = array.struct_fields().clone();
     // SAFETY: We're only changing validity, not the data structure
     unsafe { StructArray::new_unchecked(fields, struct_fields, len, new_validity) }
 }
 
-fn mask_validity_extension(array: ExtensionArray, mask: &Mask) -> ExtensionArray {
+fn mask_validity_extension(
+    array: ExtensionArray,
+    mask: &Mask,
+    ctx: &mut ExecutionCtx,
+) -> VortexResult<ExtensionArray> {
     // For extension arrays, we need to mask the underlying storage
-    let storage = array.storage().to_canonical();
-    let masked_storage = mask_validity_canonical(storage, mask);
-    ExtensionArray::new(array.ext_dtype().clone(), masked_storage.into_array())
+    let storage = array.storage().clone().execute::<Canonical>(ctx)?;
+    let masked_storage = mask_validity_canonical(storage, mask, ctx)?;
+    Ok(ExtensionArray::new(
+        array.ext_dtype().clone(),
+        masked_storage.into_array(),
+    ))
 }

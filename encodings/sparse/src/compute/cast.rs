@@ -36,6 +36,7 @@ mod tests {
     use vortex_array::IntoArray;
     use vortex_array::ToCanonical;
     use vortex_array::arrays::PrimitiveArray;
+    use vortex_array::assert_arrays_eq;
     use vortex_array::compute::cast;
     use vortex_array::compute::conformance::cast::test_cast_conformance;
     use vortex_buffer::buffer;
@@ -66,12 +67,8 @@ mod tests {
             &DType::Primitive(PType::I64, Nullability::NonNullable)
         );
 
-        let decoded = casted.to_primitive();
-        let values = decoded.as_slice::<i64>();
-        assert_eq!(values[2], 100);
-        assert_eq!(values[5], 200);
-        assert_eq!(values[8], 300);
-        assert_eq!(values[0], 0); // fill value
+        let expected = PrimitiveArray::from_iter([0i64, 0, 100, 0, 0, 200, 0, 0, 300, 0]);
+        assert_arrays_eq!(casted.to_primitive(), expected);
     }
 
     #[test]
@@ -80,7 +77,7 @@ mod tests {
             buffer![1u64, 3, 5].into_array(),
             PrimitiveArray::from_option_iter([Some(42i32), Some(84), Some(126)]).into_array(),
             8,
-            Scalar::null_typed::<i32>(),
+            Scalar::null_native::<i32>(),
         )
         .unwrap();
 
@@ -112,7 +109,7 @@ mod tests {
         buffer![1u64, 3, 7].into_array(),
         PrimitiveArray::from_option_iter([Some(100i32), None, Some(300)]).into_array(),
         10,
-        Scalar::null_typed::<i32>()
+        Scalar::null_native::<i32>()
     ).unwrap())]
     #[case(SparseArray::try_new(
         buffer![5u64].into_array(),

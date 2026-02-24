@@ -21,6 +21,7 @@ use vortex::buffer::Buffer;
 use vortex::buffer::BufferMut;
 use vortex::dtype::DType;
 use vortex::dtype::DecimalDType;
+use vortex::dtype::DecimalType;
 use vortex::dtype::FieldNames;
 use vortex::dtype::NativePType;
 use vortex::dtype::Nullability;
@@ -28,7 +29,6 @@ use vortex::dtype::datetime::TimeUnit;
 use vortex::error::VortexExpect;
 use vortex::error::VortexResult;
 use vortex::error::vortex_bail;
-use vortex::scalar::DecimalType;
 
 use crate::cpp::DUCKDB_TYPE;
 use crate::cpp::duckdb_date;
@@ -62,7 +62,7 @@ impl<'a> DuckString<'a> {
         unsafe {
             let len = duckdb_string_t_length(*self.ptr);
             let c_ptr = duckdb_string_t_data(self.ptr);
-            std::slice::from_raw_parts(c_ptr as *const u8, len as usize)
+            std::slice::from_raw_parts(c_ptr.cast::<u8>(), len as usize)
         }
     }
 }
@@ -232,7 +232,7 @@ pub fn flat_vector_to_vortex(vector: &mut Vector, len: usize) -> VortexResult<Ar
         DUCKDB_TYPE::DUCKDB_TYPE_TIMESTAMP_TZ => {
             let arr = vector_mapped(vector, len, |duckdb_timestamp { micros }| *micros);
             Ok(
-                TemporalArray::new_timestamp(arr, TimeUnit::Microseconds, Some("UTC".to_string()))
+                TemporalArray::new_timestamp(arr, TimeUnit::Microseconds, Some("UTC".into()))
                     .into_array(),
             )
         }
@@ -261,7 +261,7 @@ pub fn flat_vector_to_vortex(vector: &mut Vector, len: usize) -> VortexResult<Ar
         DUCKDB_TYPE::DUCKDB_TYPE_BOOLEAN => {
             let data = vector.as_slice_with_len::<bool>(len);
 
-            Ok(BoolArray::from_bit_buffer(
+            Ok(BoolArray::new(
                 BitBuffer::from(data),
                 vector.validity_ref(data.len()).to_validity(),
             )
@@ -376,9 +376,10 @@ mod tests {
     use std::ffi::CString;
 
     use vortex::array::ToCanonical;
-    use vortex::array::arrays::PrimitiveVTable;
+    use vortex::array::arrays::BoolArray;
     use vortex::error::VortexExpect;
     use vortex::mask::Mask;
+    use vortex_array::assert_arrays_eq;
 
     use super::*;
     use crate::cpp::DUCKDB_TYPE;
@@ -401,9 +402,9 @@ mod tests {
 
         // Test conversion
         let result = flat_vector_to_vortex(&mut vector, len).unwrap();
-        let vortex_array = result.as_::<PrimitiveVTable>().as_slice::<i32>();
-
-        assert_eq!(vortex_array, values);
+        let expected =
+            PrimitiveArray::from_option_iter([Some(1i32), Some(2), Some(3), Some(4), Some(5)]);
+        assert_arrays_eq!(result, expected);
     }
 
     #[test]
@@ -502,7 +503,7 @@ mod tests {
 
         assert_eq!(values_slice, values);
         assert_eq!(
-            vortex_values.validity_mask(),
+            vortex_values.validity_mask().unwrap(),
             Mask::from_indices(3, vec![0, 2])
         );
     }
@@ -577,9 +578,8 @@ mod tests {
         // Test conversion
         let result = flat_vector_to_vortex(&mut vector, len).unwrap();
         let vortex_array = result.to_bool();
-
-        assert_eq!(vortex_array.len(), len);
-        assert_eq!(vortex_array.bit_buffer().iter().collect::<Vec<_>>(), values);
+        let expected = BoolArray::new(BitBuffer::from(values), Validity::AllValid);
+        assert_arrays_eq!(vortex_array, expected);
     }
 
     #[test]
@@ -608,7 +608,7 @@ mod tests {
 
         assert_eq!(vortex_slice, values);
         assert_eq!(
-            vortex_array.validity_mask(),
+            vortex_array.validity_mask().unwrap(),
             Mask::from_indices(3, vec![0, 2])
         );
     }
@@ -640,12 +640,9 @@ mod tests {
         let vortex_array = result.to_listview();
 
         assert_eq!(vortex_array.len(), len);
-        assert_eq!(
-            vortex_array
-                .list_elements_at(0)
-                .to_primitive()
-                .as_slice::<i32>(),
-            &[1, 2, 3, 4]
+        assert_arrays_eq!(
+            vortex_array.list_elements_at(0).unwrap(),
+            PrimitiveArray::from_option_iter([Some(1i32), Some(2), Some(3), Some(4)])
         );
     }
 
@@ -671,12 +668,9 @@ mod tests {
         let vortex_array = result.to_fixed_size_list();
 
         assert_eq!(vortex_array.len(), len);
-        assert_eq!(
-            vortex_array
-                .fixed_size_list_elements_at(0)
-                .to_primitive()
-                .as_slice::<i32>(),
-            &[1, 2, 3, 4]
+        assert_arrays_eq!(
+            vortex_array.fixed_size_list_elements_at(0).unwrap(),
+            PrimitiveArray::from_option_iter([Some(1i32), Some(2), Some(3), Some(4)])
         );
     }
 
@@ -692,7 +686,7 @@ mod tests {
         let vortex_array = result.to_struct();
 
         assert_eq!(vortex_array.len(), len);
-        assert_eq!(vortex_array.fields().len(), 0);
+        assert_eq!(vortex_array.unmasked_fields().len(), 0);
     }
 
     #[test]
@@ -727,14 +721,14 @@ mod tests {
         let vortex_array = result.to_struct();
 
         assert_eq!(vortex_array.len(), len);
-        assert_eq!(vortex_array.fields().len(), 2);
-        assert_eq!(
-            vortex_array.fields()[0].to_primitive().as_slice::<i32>(),
-            &[1, 2, 3, 4]
+        assert_eq!(vortex_array.unmasked_fields().len(), 2);
+        assert_arrays_eq!(
+            &vortex_array.unmasked_fields()[0],
+            PrimitiveArray::from_option_iter([Some(1i32), Some(2), Some(3), Some(4)])
         );
-        assert_eq!(
-            vortex_array.fields()[1].to_primitive().as_slice::<i32>(),
-            &[5, 6, 7, 8]
+        assert_arrays_eq!(
+            &vortex_array.unmasked_fields()[1],
+            PrimitiveArray::from_option_iter([Some(5i32), Some(6), Some(7), Some(8)])
         );
     }
 
@@ -776,14 +770,14 @@ mod tests {
         let vortex_array = result.to_listview();
 
         assert_eq!(vortex_array.len(), len);
-        assert_eq!(
-            vortex_array
-                .list_elements_at(0)
-                .to_primitive()
-                .as_slice::<i32>(),
-            &[1, 2, 3, 4]
+        assert_arrays_eq!(
+            vortex_array.list_elements_at(0).unwrap(),
+            PrimitiveArray::from_option_iter([Some(1i32), Some(2), Some(3), Some(4)])
         );
-        assert_eq!(vortex_array.validity_mask(), Mask::from_indices(2, vec![0]));
+        assert_eq!(
+            vortex_array.validity_mask().unwrap(),
+            Mask::from_indices(2, vec![0])
+        );
     }
 
     #[test]
@@ -821,19 +815,13 @@ mod tests {
         let vortex_array = result.to_listview();
 
         assert_eq!(vortex_array.len(), len);
-        assert_eq!(
-            vortex_array
-                .list_elements_at(0)
-                .to_primitive()
-                .as_slice::<i32>(),
-            &[3, 4]
+        assert_arrays_eq!(
+            vortex_array.list_elements_at(0).unwrap(),
+            PrimitiveArray::from_option_iter([Some(3i32), Some(4)])
         );
-        assert_eq!(
-            vortex_array
-                .list_elements_at(1)
-                .to_primitive()
-                .as_slice::<i32>(),
-            &[1, 2]
+        assert_arrays_eq!(
+            vortex_array.list_elements_at(1).unwrap(),
+            PrimitiveArray::from_option_iter([Some(1i32), Some(2)])
         );
     }
 
@@ -884,19 +872,13 @@ mod tests {
         assert_eq!(vortex_array.len(), len);
 
         // Valid entries should work correctly.
-        assert_eq!(
-            vortex_array
-                .list_elements_at(0)
-                .to_primitive()
-                .as_slice::<i32>(),
-            &[1, 2]
+        assert_arrays_eq!(
+            vortex_array.list_elements_at(0).unwrap(),
+            PrimitiveArray::from_option_iter([Some(1i32), Some(2)])
         );
-        assert_eq!(
-            vortex_array
-                .list_elements_at(2)
-                .to_primitive()
-                .as_slice::<i32>(),
-            &[3, 4]
+        assert_arrays_eq!(
+            vortex_array.list_elements_at(2).unwrap(),
+            PrimitiveArray::from_option_iter([Some(3i32), Some(4)])
         );
 
         // Verify the null entry has sanitized offset/size (offset=2, size=0) rather than garbage.
@@ -906,7 +888,7 @@ mod tests {
         assert_eq!(sizes.as_slice::<i64>()[1], 0);
 
         assert_eq!(
-            vortex_array.validity_mask(),
+            vortex_array.validity_mask().unwrap(),
             Mask::from_indices(3, vec![0, 2])
         );
     }

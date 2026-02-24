@@ -84,7 +84,7 @@ impl VectorIntoArray<BoolArray> for BoolVector {
         assert!(matches!(dtype, DType::Bool(_)));
 
         let (bits, validity) = self.into_parts();
-        BoolArray::from_bit_buffer(bits, Validity::from_mask(validity, dtype.nullability()))
+        BoolArray::new(bits, Validity::from_mask(validity, dtype.nullability()))
     }
 }
 
@@ -145,7 +145,7 @@ impl<D: NativeDecimalType> VectorIntoArray<DecimalArray> for DVector<D> {
 
 impl<T: BinaryViewType> VectorIntoArray<VarBinViewArray> for BinaryViewVector<T> {
     fn into_array(self, dtype: &DType) -> VarBinViewArray {
-        assert!(matches!(dtype, DType::Utf8(_)));
+        assert!(matches!(dtype, DType::Utf8(_) | DType::Binary(_)));
 
         let (views, buffers, validity) = self.into_parts();
         let validity = Validity::from_mask(validity, dtype.nullability());

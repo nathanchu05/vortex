@@ -144,7 +144,7 @@ impl Vector {
         // Direct bit manipulation for better performance
         let entry_idx = row / 64;
         let idx_in_entry = row % 64;
-        let validity_u64_ptr = validity as *const u64;
+        let validity_u64_ptr = validity.cast_const();
         let validity_entry = unsafe { *validity_u64_ptr.add(entry_idx as usize) };
         let is_valid = (validity_entry & (1u64 << idx_in_entry)) != 0;
 
@@ -295,6 +295,17 @@ impl Vector {
             ))
         }
     }
+
+    pub fn get_value(&self, idx: u64, len: u64) -> Option<Value> {
+        if idx >= len {
+            return None;
+        }
+
+        unsafe {
+            let value_ptr = cpp::duckdb_vx_vector_get_value(self.as_ptr(), idx as idx_t);
+            Some(Value::own(value_ptr))
+        }
+    }
 }
 
 pub struct ValidityRef<'a> {
@@ -390,7 +401,7 @@ mod tests {
 
         let validity = vector.validity_ref(len);
         let validity = validity.to_validity();
-        assert!(validity.is_null(0));
+        assert!(validity.is_null(0).unwrap());
     }
 
     #[test]
@@ -406,7 +417,7 @@ mod tests {
 
         let validity = vector.validity_ref(len);
         let validity = validity.to_validity();
-        assert!(validity.is_valid(0));
+        assert!(validity.is_valid(0).unwrap());
     }
 
     #[test]

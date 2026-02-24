@@ -9,25 +9,28 @@ use vortex_error::VortexResult;
 use vortex_scalar::Scalar;
 
 use crate::ArrayRef;
+use crate::ExecutionCtx;
 use crate::IntoArray;
 use crate::ToCanonical;
 use crate::arrays::PrimitiveVTable;
 use crate::arrays::primitive::PrimitiveArray;
 use crate::compute::FillNullKernel;
-use crate::compute::FillNullKernelAdapter;
-use crate::register_kernel;
 use crate::validity::Validity;
 use crate::vtable::ValidityHelper;
 
 impl FillNullKernel for PrimitiveVTable {
-    fn fill_null(&self, array: &PrimitiveArray, fill_value: &Scalar) -> VortexResult<ArrayRef> {
+    fn fill_null(
+        array: &PrimitiveArray,
+        fill_value: &Scalar,
+        _ctx: &mut ExecutionCtx,
+    ) -> VortexResult<Option<ArrayRef>> {
         let result_validity = Validity::from(fill_value.dtype().nullability());
 
-        Ok(match array.validity() {
+        Ok(Some(match array.validity() {
             Validity::Array(is_valid) => {
-                let is_invalid = is_valid.to_bool().bit_buffer().not();
+                let is_invalid = is_valid.to_bool().to_bit_buffer().not();
                 match_each_native_ptype!(array.ptype(), |T| {
-                    let mut buffer = array.buffer::<T>().into_mut();
+                    let mut buffer = array.to_buffer::<T>().into_mut();
                     let fill_value = fill_value
                         .as_primitive()
                         .typed_value::<T>()
@@ -39,11 +42,9 @@ impl FillNullKernel for PrimitiveVTable {
                 })
             }
             _ => unreachable!("checked in entry point"),
-        })
+        }))
     }
 }
-
-register_kernel!(FillNullKernelAdapter(PrimitiveVTable).lift());
 
 #[cfg(test)]
 mod test {
@@ -53,6 +54,7 @@ mod test {
     use crate::IntoArray;
     use crate::arrays::BoolArray;
     use crate::arrays::primitive::PrimitiveArray;
+    use crate::assert_arrays_eq;
     use crate::canonical::ToCanonical;
     use crate::compute::fill_null;
     use crate::validity::Validity;
@@ -63,8 +65,8 @@ mod test {
         let p = fill_null(arr.as_ref(), &Scalar::from(42u8))
             .unwrap()
             .to_primitive();
-        assert_eq!(p.as_slice::<u8>(), vec![42, 8, 42, 10, 42]);
-        assert!(p.validity_mask().all_true());
+        assert_arrays_eq!(p, PrimitiveArray::from_iter([42u8, 8, 42, 10, 42]));
+        assert!(p.validity_mask().unwrap().all_true());
     }
 
     #[test]
@@ -74,8 +76,8 @@ mod test {
         let p = fill_null(arr.as_ref(), &Scalar::from(255u8))
             .unwrap()
             .to_primitive();
-        assert_eq!(p.as_slice::<u8>(), vec![255, 255, 255, 255, 255]);
-        assert!(p.validity_mask().all_true());
+        assert_arrays_eq!(p, PrimitiveArray::from_iter([255u8, 255, 255, 255, 255]));
+        assert!(p.validity_mask().unwrap().all_true());
     }
 
     #[test]
@@ -87,8 +89,8 @@ mod test {
         let p = fill_null(arr.as_ref(), &Scalar::from(255u8))
             .unwrap()
             .to_primitive();
-        assert_eq!(p.as_slice::<u8>(), vec![8, 10, 12, 14, 16]);
-        assert!(p.validity_mask().all_true());
+        assert_arrays_eq!(p, PrimitiveArray::from_iter([8u8, 10, 12, 14, 16]));
+        assert!(p.validity_mask().unwrap().all_true());
     }
 
     #[test]
@@ -97,7 +99,7 @@ mod test {
         let p = fill_null(&arr, &Scalar::from(255u8))
             .unwrap()
             .to_primitive();
-        assert_eq!(p.as_slice::<u8>(), vec![8u8, 10, 12, 14, 16]);
-        assert!(p.validity_mask().all_true());
+        assert_arrays_eq!(p, PrimitiveArray::from_iter([8u8, 10, 12, 14, 16]));
+        assert!(p.validity_mask().unwrap().all_true());
     }
 }

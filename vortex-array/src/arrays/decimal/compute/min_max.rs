@@ -33,7 +33,7 @@ fn compute_min_max_with_validity<D>(array: &DecimalArray) -> VortexResult<Option
 where
     D: Into<DecimalValue> + NativeDecimalType,
 {
-    Ok(match array.validity_mask() {
+    Ok(match array.validity_mask()? {
         Mask::AllTrue(_) => compute_min_max(array.buffer::<D>().iter(), array.decimal_dtype()),
         Mask::AllFalse(_) => None,
         Mask::Values(v) => compute_min_max(
@@ -95,14 +95,16 @@ mod tests {
 
         let non_nullable_dtype = decimal.dtype().as_nonnullable();
         let expected = MinMaxResult {
-            min: Scalar::new(
+            min: Scalar::try_new(
                 non_nullable_dtype.clone(),
-                ScalarValue::from(DecimalValue::from(100i32)),
-            ),
-            max: Scalar::new(
+                Some(ScalarValue::from(DecimalValue::from(100i32))),
+            )
+            .unwrap(),
+            max: Scalar::try_new(
                 non_nullable_dtype,
-                ScalarValue::from(DecimalValue::from(200i32)),
-            ),
+                Some(ScalarValue::from(DecimalValue::from(200i32))),
+            )
+            .unwrap(),
         };
 
         assert_eq!(Some(expected), min_max)

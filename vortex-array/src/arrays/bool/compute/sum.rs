@@ -3,6 +3,7 @@
 
 use std::ops::BitAnd;
 
+use vortex_dtype::Nullability;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 use vortex_mask::AllOr;
@@ -16,27 +17,29 @@ use crate::register_kernel;
 
 impl SumKernel for BoolVTable {
     fn sum(&self, array: &BoolArray, accumulator: &Scalar) -> VortexResult<Scalar> {
-        let true_count: Option<u64> = match array.validity_mask().bit_buffer() {
+        let true_count: Option<u64> = match array.validity_mask()?.bit_buffer() {
             AllOr::All => {
                 // All-valid
-                Some(array.bit_buffer().true_count() as u64)
+                Some(array.to_bit_buffer().true_count() as u64)
             }
             AllOr::None => {
                 // All-invalid
                 unreachable!("All-invalid boolean array should have been handled by entry-point")
             }
             AllOr::Some(validity_mask) => {
-                Some(array.bit_buffer().bitand(validity_mask).true_count() as u64)
+                Some(array.to_bit_buffer().bitand(validity_mask).true_count() as u64)
             }
         };
 
-        let accumulator = accumulator
+        let acc_value = accumulator
             .as_primitive()
             .as_::<u64>()
             .vortex_expect("cannot be null");
-        Ok(Scalar::from(
-            true_count.and_then(|tc| accumulator.checked_add(tc)),
-        ))
+        let result = true_count.and_then(|tc| acc_value.checked_add(tc));
+        Ok(match result {
+            Some(v) => Scalar::primitive(v, Nullability::Nullable),
+            None => Scalar::null_native::<u64>(),
+        })
     }
 }
 

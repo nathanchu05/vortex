@@ -22,10 +22,10 @@
 //!
 //! let strings = builder.finish();
 //!
-//! assert_eq!(strings.scalar_at(0), "a".into());
-//! assert_eq!(strings.scalar_at(1), "b".into());
-//! assert_eq!(strings.scalar_at(2), "c".into());
-//! assert_eq!(strings.scalar_at(3), "d".into());
+//! assert_eq!(strings.scalar_at(0).unwrap(), "a".into());
+//! assert_eq!(strings.scalar_at(1).unwrap(), "b".into());
+//! assert_eq!(strings.scalar_at(2).unwrap(), "c".into());
+//! assert_eq!(strings.scalar_at(3).unwrap(), "d".into());
 //! ```
 
 use std::any::Any;
@@ -33,6 +33,7 @@ use std::any::Any;
 use vortex_dtype::DType;
 use vortex_dtype::match_each_decimal_value_type;
 use vortex_dtype::match_each_native_ptype;
+use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 use vortex_error::vortex_panic;
 use vortex_mask::Mask;
@@ -212,7 +213,9 @@ pub trait ArrayBuilder: Send {
     /// then converts it to canonical form. Specific builders can override this with optimized
     /// implementations that avoid the intermediate [`Array`] creation.
     fn finish_into_canonical(&mut self) -> Canonical {
-        self.finish().to_canonical()
+        self.finish()
+            .to_canonical()
+            .vortex_expect("finish_into_canonical failed")
     }
 }
 
@@ -235,10 +238,10 @@ pub trait ArrayBuilder: Send {
 ///
 /// let strings = builder.finish();
 ///
-/// assert_eq!(strings.scalar_at(0), "a".into());
-/// assert_eq!(strings.scalar_at(1), "b".into());
-/// assert_eq!(strings.scalar_at(2), "c".into());
-/// assert_eq!(strings.scalar_at(3), "d".into());
+/// assert_eq!(strings.scalar_at(0).unwrap(), "a".into());
+/// assert_eq!(strings.scalar_at(1).unwrap(), "b".into());
+/// assert_eq!(strings.scalar_at(2).unwrap(), "c".into());
+/// assert_eq!(strings.scalar_at(3).unwrap(), "d".into());
 /// ```
 pub fn builder_with_capacity(dtype: &DType, capacity: usize) -> Box<dyn ArrayBuilder> {
     match dtype {

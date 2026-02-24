@@ -10,9 +10,8 @@ use vortex_error::VortexResult;
 use vortex_error::vortex_err;
 use vortex_proto::expr as pb;
 use vortex_scalar::Scalar;
-use vortex_vector::Datum;
+use vortex_session::VortexSession;
 
-use crate::Array;
 use crate::ArrayRef;
 use crate::IntoArray;
 use crate::arrays::ConstantArray;
@@ -39,18 +38,24 @@ impl VTable for Literal {
     fn serialize(&self, instance: &Self::Options) -> VortexResult<Option<Vec<u8>>> {
         Ok(Some(
             pb::LiteralOpts {
-                value: Some(instance.as_ref().into()),
+                value: Some(instance.into()),
             }
             .encode_to_vec(),
         ))
     }
 
-    fn deserialize(&self, metadata: &[u8]) -> VortexResult<Self::Options> {
-        let ops = pb::LiteralOpts::decode(metadata)?;
-        ops.value
-            .as_ref()
-            .ok_or_else(|| vortex_err!("Literal metadata missing value"))?
-            .try_into()
+    fn deserialize(
+        &self,
+        _metadata: &[u8],
+        session: &VortexSession,
+    ) -> VortexResult<Self::Options> {
+        let ops = pb::LiteralOpts::decode(_metadata)?;
+        Scalar::from_proto(
+            ops.value
+                .as_ref()
+                .ok_or_else(|| vortex_err!("Literal metadata missing value"))?,
+            session,
+        )
     }
 
     fn arity(&self, _options: &Self::Options) -> Arity {
@@ -74,18 +79,8 @@ impl VTable for Literal {
         Ok(options.dtype().clone())
     }
 
-    fn evaluate(
-        &self,
-        scalar: &Scalar,
-        _expr: &Expression,
-        scope: &ArrayRef,
-    ) -> VortexResult<ArrayRef> {
-        Ok(ConstantArray::new(scalar.clone(), scope.len()).into_array())
-    }
-
-    fn execute(&self, scalar: &Scalar, _args: ExecutionArgs) -> VortexResult<Datum> {
-        let vector_scalar = scalar.to_vector_scalar();
-        Ok(Datum::Scalar(vector_scalar))
+    fn execute(&self, scalar: &Scalar, args: ExecutionArgs) -> VortexResult<ArrayRef> {
+        Ok(ConstantArray::new(scalar.clone(), args.row_count).into_array())
     }
 
     fn stat_expression(
@@ -130,6 +125,14 @@ impl VTable for Literal {
                 None
             }
         }
+    }
+
+    fn validity(
+        &self,
+        scalar: &Scalar,
+        _expression: &Expression,
+    ) -> VortexResult<Option<Expression>> {
+        Ok(Some(lit(scalar.is_valid())))
     }
 
     fn is_null_sensitive(&self, _instance: &Self::Options) -> bool {

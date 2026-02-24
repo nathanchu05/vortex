@@ -3,9 +3,9 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use futures::FutureExt;
 use futures::future::BoxFuture;
+use vortex_array::buffer::BufferHandle;
 use vortex_buffer::Alignment;
 use vortex_buffer::ByteBuffer;
 use vortex_error::VortexExpect;
@@ -13,123 +13,149 @@ use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
 use vortex_metrics::Counter;
 use vortex_metrics::Histogram;
+use vortex_metrics::Label;
+use vortex_metrics::MetricBuilder;
+use vortex_metrics::MetricsRegistry;
 use vortex_metrics::Timer;
-use vortex_metrics::VortexMetrics;
 
-/// The read trait used within Vortex.
+/// Configuration for coalescing nearby I/O requests into single operations.
+#[derive(Clone, Copy, Debug)]
+pub struct CoalesceConfig {
+    /// The maximum "empty" distance between two requests to consider them for coalescing.
+    pub distance: u64,
+    /// The maximum total size spanned by a coalesced request.
+    pub max_size: u64,
+}
+
+impl CoalesceConfig {
+    /// Creates a new coalesce configuration.
+    pub fn new(distance: u64, max_size: u64) -> Self {
+        Self { distance, max_size }
+    }
+
+    /// Configuration appropriate for fast local storage (memory, NVMe).
+    pub fn local() -> Self {
+        Self::new(8 * 1024, 8 * 1024) // 8KB
+    }
+
+    /// Configuration appropriate for object storage (S3, GCS, etc.).
+    pub fn object_storage() -> Self {
+        Self::new(1 << 20, 16 << 20) // 1MB distance, 16MB max
+    }
+}
+
+/// The unified read trait for Vortex I/O sources.
 ///
 /// This trait provides async positional reads to underlying storage and is used by the vortex-file
 /// crate to read data from files or object stores.
-///
-/// It behaves a little differently from a typical async read trait in order to provide us with
-/// some nice additional semantics for use within Vortex. See the [`VortexReadAt::read_at`] method
-/// for details.
 pub trait VortexReadAt: Send + Sync + 'static {
-    /// Request an asynchronous positional read. Results will be returned as a [`ByteBuffer`].
-    ///
-    /// If the reader does not have the requested number of bytes, the returned Future will complete
-    /// with an [`UnexpectedEof`][std::io::ErrorKind::UnexpectedEof].
-    ///
-    /// This function returns a future with a `'static` lifetime. This allows us to define the
-    /// following semantics:
-    ///
-    /// This function returns a future with a `'static` lifetime, allowing us to define the
-    /// following semantics:
-    ///
-    /// * Creation of the future hints to the implementation that a read _may_ be required.
-    /// * Polling of the future indicates that the read _is now_ required.
-    /// * Dropping of the future indicates that the read is not required, and may be cancelled.
-    ///
-    /// Implementations may choose to ignore these semantics, but they allow optimizations such as
-    /// coalescing and cancellation. See [`crate::file::FileRead`] for an example of such an
-    /// implementation.
-    ///
-    /// ## For Developers
-    ///
-    /// This trait is left unsealed to provide maximum flexibility for users of the Vortex, however
-    /// we strongly recommend using the [`crate::file::FileRead`] abstraction where possible as we
-    /// will continue to evolve and optimize its implementation for the best performance across
-    /// as many filesystems and platforms as possible.
-    fn read_at(
-        &self,
-        offset: u64,
-        length: usize,
-        alignment: Alignment,
-    ) -> BoxFuture<'static, VortexResult<ByteBuffer>>;
+    /// URI for debugging/logging. Returns `None` for anonymous sources.
+    fn uri(&self) -> Option<&Arc<str>> {
+        None
+    }
 
-    /// Asynchronously get the number of bytes of the underlying file.
+    /// Configuration for merging nearby I/O requests into fewer, larger reads.
+    fn coalesce_config(&self) -> Option<CoalesceConfig> {
+        None
+    }
+
+    /// Maximum number of concurrent I/O requests for that should be pulled from this source.
+    ///
+    /// This value is used to control how many [`VortexReadAt::read_at`] calls can
+    /// be in-flight simultaneously. Higher values allow more parallelism but consume
+    /// more resources (memory, file descriptors, network connections).
+    ///
+    /// Implementations should choose a value appropriate for their underlying storage
+    /// characteristics. Low-latency sources benefit less from high concurrency, while
+    /// high-latency sources (like remote storage) benefit significantly from issuing
+    /// many requests in parallel.
+    fn concurrency(&self) -> usize;
+
+    /// Asynchronously get the number of bytes of the underlying source.
     fn size(&self) -> BoxFuture<'static, VortexResult<u64>>;
 
-    // TODO(ngates): this is deprecated, but cannot yet be removed.
-    fn performance_hint(&self) -> PerformanceHint {
-        PerformanceHint::local()
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct PerformanceHint {
-    coalescing_window: u64,
-    max_read: Option<u64>,
-}
-
-impl PerformanceHint {
-    pub fn new(coalescing_window: u64, max_read: Option<u64>) -> Self {
-        Self {
-            coalescing_window,
-            max_read,
-        }
-    }
-
-    /// Creates a new instance with a profile appropriate for fast local storage, like memory or files on NVMe devices.
-    pub fn local() -> Self {
-        // Coalesce ~8K page size, also ensures we span padding for adjacent segments.
-        Self::new(8192, Some(8192))
-    }
-
-    pub fn object_storage() -> Self {
-        Self::new(
-            1 << 20,       // 1MB,
-            Some(8 << 20), // 8MB,
-        )
-    }
-
-    /// The maximum distance between two reads that should coalesced into a single operation.
-    pub fn coalescing_window(&self) -> u64 {
-        self.coalescing_window
-    }
-
-    /// Maximum number of bytes in a coalesced read.
-    pub fn max_read(&self) -> Option<u64> {
-        self.max_read
-    }
-}
-
-impl<R: VortexReadAt> VortexReadAt for Arc<R> {
+    /// Request an asynchronous positional read. Results will be returned as a [`BufferHandle`].
+    ///
+    /// If the reader does not have the requested number of bytes, the returned Future will complete
+    /// with an [`UnexpectedEof`][std::io::ErrorKind::UnexpectedEof] error.
     fn read_at(
         &self,
         offset: u64,
         length: usize,
         alignment: Alignment,
-    ) -> BoxFuture<'static, VortexResult<ByteBuffer>> {
-        self.as_ref().read_at(offset, length, alignment)
+    ) -> BoxFuture<'static, VortexResult<BufferHandle>>;
+}
+
+impl VortexReadAt for Arc<dyn VortexReadAt> {
+    fn uri(&self) -> Option<&Arc<str>> {
+        self.as_ref().uri()
+    }
+
+    fn coalesce_config(&self) -> Option<CoalesceConfig> {
+        self.as_ref().coalesce_config()
+    }
+
+    fn concurrency(&self) -> usize {
+        self.as_ref().concurrency()
     }
 
     fn size(&self) -> BoxFuture<'static, VortexResult<u64>> {
         self.as_ref().size()
     }
 
-    fn performance_hint(&self) -> PerformanceHint {
-        self.as_ref().performance_hint()
-    }
-}
-
-impl VortexReadAt for ByteBuffer {
     fn read_at(
         &self,
         offset: u64,
         length: usize,
         alignment: Alignment,
-    ) -> BoxFuture<'static, VortexResult<ByteBuffer>> {
+    ) -> BoxFuture<'static, VortexResult<BufferHandle>> {
+        self.as_ref().read_at(offset, length, alignment)
+    }
+}
+
+impl<R: VortexReadAt> VortexReadAt for Arc<R> {
+    fn uri(&self) -> Option<&Arc<str>> {
+        self.as_ref().uri()
+    }
+
+    fn coalesce_config(&self) -> Option<CoalesceConfig> {
+        self.as_ref().coalesce_config()
+    }
+
+    fn concurrency(&self) -> usize {
+        self.as_ref().concurrency()
+    }
+
+    fn size(&self) -> BoxFuture<'static, VortexResult<u64>> {
+        self.as_ref().size()
+    }
+
+    fn read_at(
+        &self,
+        offset: u64,
+        length: usize,
+        alignment: Alignment,
+    ) -> BoxFuture<'static, VortexResult<BufferHandle>> {
+        self.as_ref().read_at(offset, length, alignment)
+    }
+}
+
+impl VortexReadAt for ByteBuffer {
+    fn size(&self) -> BoxFuture<'static, VortexResult<u64>> {
+        let length = self.len() as u64;
+        async move { Ok(length) }.boxed()
+    }
+
+    fn concurrency(&self) -> usize {
+        16
+    }
+
+    fn read_at(
+        &self,
+        offset: u64,
+        length: usize,
+        alignment: Alignment,
+    ) -> BoxFuture<'static, VortexResult<BufferHandle>> {
         let buffer = self.clone();
         async move {
             let start = usize::try_from(offset).vortex_expect("start too big for usize");
@@ -143,99 +169,141 @@ impl VortexReadAt for ByteBuffer {
                     buffer.len()
                 );
             }
-            Ok(buffer.slice_unaligned(start..end).aligned(alignment))
+            Ok(BufferHandle::new_host(
+                buffer.slice_unaligned(start..end).aligned(alignment),
+            ))
         }
         .boxed()
     }
-
-    fn size(&self) -> BoxFuture<'static, VortexResult<u64>> {
-        let length = self.len() as u64;
-        async move { Ok(length) }.boxed()
-    }
-
-    fn performance_hint(&self) -> PerformanceHint {
-        PerformanceHint::local()
-    }
 }
 
+/// A wrapper that instruments a [`VortexReadAt`] with metrics.
 #[derive(Clone)]
-pub struct InstrumentedReadAt<T: VortexReadAt> {
-    read: Arc<T>,
-    sizes: Arc<Histogram>,
-    total_size: Arc<Counter>,
-    durations: Arc<Timer>,
+pub struct InstrumentedReadAt<T: VortexReadAt + Clone> {
+    read: T,
+    // We use `Arc` to take care of all the complexity that's potentially associated with reference counting
+    // and dropping
+    metrics: Arc<InnerMetrics>,
 }
 
-impl<T: VortexReadAt> InstrumentedReadAt<T> {
-    pub fn new(read: Arc<T>, metrics: &VortexMetrics) -> Self {
+struct InnerMetrics {
+    sizes: Histogram,
+    total_size: Counter,
+    durations: Timer,
+}
+
+impl<T: VortexReadAt + Clone> InstrumentedReadAt<T> {
+    pub fn new(read: T, metrics_registry: &dyn MetricsRegistry) -> Self {
+        Self::new_with_labels(read, metrics_registry, Vec::<Label>::default())
+    }
+
+    pub fn new_with_labels<I, L>(read: T, metrics_registry: &dyn MetricsRegistry, labels: I) -> Self
+    where
+        I: IntoIterator<Item = L>,
+        L: Into<Label>,
+    {
+        let labels = labels.into_iter().map(|l| l.into()).collect::<Vec<Label>>();
+        let sizes = MetricBuilder::new(metrics_registry)
+            .add_labels(labels.clone())
+            .histogram("vortex.io.read.size");
+        let total_size = MetricBuilder::new(metrics_registry)
+            .add_labels(labels.clone())
+            .counter("vortex.io.read.total_size");
+        let durations = MetricBuilder::new(metrics_registry)
+            .add_labels(labels)
+            .timer("vortex.io.read.duration");
+
         Self {
             read,
-            sizes: metrics.histogram("vortex.io.read.size"),
-            total_size: metrics.counter("vortex.io.read.total_size"),
-            durations: metrics.timer("vortex.io.read.duration"),
+            metrics: Arc::new(InnerMetrics {
+                sizes,
+                total_size,
+                durations,
+            }),
         }
     }
 }
 
-impl<T> Drop for InstrumentedReadAt<T>
-where
-    T: VortexReadAt,
-{
+// We implement drop for `InnerMetrics` so this will be logged only when we eventually drop the final instance of `InstrumentedRead`
+impl Drop for InnerMetrics {
     #[allow(clippy::cognitive_complexity)]
     fn drop(&mut self) {
-        let sizes = self.sizes.snapshot();
         tracing::debug!("Reads: {}", self.sizes.count());
-        tracing::debug!(
-            "Read size: p50={} p95={} p99={} p999={}",
-            sizes.value(0.5),
-            sizes.value(0.95),
-            sizes.value(0.99),
-            sizes.value(0.999),
-        );
+        if !self.sizes.is_empty() {
+            tracing::debug!(
+                "Read size: p50={} p95={} p99={} p999={}",
+                self.sizes.quantile(0.5).vortex_expect("must not be empty"),
+                self.sizes.quantile(0.95).vortex_expect("must not be empty"),
+                self.sizes.quantile(0.99).vortex_expect("must not be empty"),
+                self.sizes
+                    .quantile(0.999)
+                    .vortex_expect("must not be empty"),
+            );
+        }
 
-        let total_size = self.total_size.count();
+        let total_size = self.total_size.value();
         tracing::debug!("Total read size: {total_size}");
 
-        let durations = self.durations.snapshot();
-        tracing::debug!(
-            "Read duration: p50={}ms p95={}ms p99={}ms p999={}ms",
-            durations.value(0.5) / 1_000_000.0,
-            durations.value(0.95) / 1_000_000.0,
-            durations.value(0.99) / 1_000_000.0,
-            durations.value(0.999) / 1_000_000.0
-        );
+        if !self.durations.is_empty() {
+            tracing::debug!(
+                "Read duration: p50={}ms p95={}ms p99={}ms p999={}ms",
+                self.durations
+                    .quantile(0.5)
+                    .vortex_expect("must not be empty")
+                    .as_millis(),
+                self.durations
+                    .quantile(0.95)
+                    .vortex_expect("must not be empty")
+                    .as_millis(),
+                self.durations
+                    .quantile(0.99)
+                    .vortex_expect("must not be empty")
+                    .as_millis(),
+                self.durations
+                    .quantile(0.999)
+                    .vortex_expect("must not be empty")
+                    .as_millis(),
+            );
+        }
     }
 }
 
-#[async_trait]
-impl<T: VortexReadAt> VortexReadAt for InstrumentedReadAt<T> {
+impl<T: VortexReadAt + Clone> VortexReadAt for InstrumentedReadAt<T> {
+    fn uri(&self) -> Option<&Arc<str>> {
+        self.read.uri()
+    }
+
+    fn coalesce_config(&self) -> Option<CoalesceConfig> {
+        self.read.coalesce_config()
+    }
+
+    fn concurrency(&self) -> usize {
+        self.read.concurrency()
+    }
+
+    fn size(&self) -> BoxFuture<'static, VortexResult<u64>> {
+        self.read.size()
+    }
+
     fn read_at(
         &self,
         offset: u64,
         length: usize,
         alignment: Alignment,
-    ) -> BoxFuture<'static, VortexResult<ByteBuffer>> {
-        let durations = self.durations.clone();
-        let sizes = self.sizes.clone();
-        let total_size = self.total_size.clone();
+    ) -> BoxFuture<'static, VortexResult<BufferHandle>> {
+        let durations = self.metrics.durations.clone();
+        let sizes = self.metrics.sizes.clone();
+        let total_size = self.metrics.total_size.clone();
+
         let read_fut = self.read.read_at(offset, length, alignment);
         async move {
             let _timer = durations.time();
             let buf = read_fut.await;
-            sizes.update(length as i64);
-            total_size.add(length as i64);
+            sizes.update(length as f64);
+            total_size.add(length as u64);
             buf
         }
         .boxed()
-    }
-
-    #[inline]
-    fn size(&self) -> BoxFuture<'static, VortexResult<u64>> {
-        self.read.size()
-    }
-
-    fn performance_hint(&self) -> PerformanceHint {
-        self.read.performance_hint()
     }
 }
 
@@ -249,31 +317,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_performance_hint_local() {
-        let hint = PerformanceHint::local();
-        assert_eq!(hint.coalescing_window(), 8192);
-        assert_eq!(hint.max_read(), Some(8192));
+    fn test_coalesce_config_local() {
+        let config = CoalesceConfig::local();
+        assert_eq!(config.distance, 8 * 1024);
+        assert_eq!(config.max_size, 8 * 1024);
     }
 
     #[test]
-    fn test_performance_hint_object_storage() {
-        let hint = PerformanceHint::object_storage();
-        assert_eq!(hint.coalescing_window(), 1 << 20); // 1MB
-        assert_eq!(hint.max_read(), Some(8 << 20)); // 8MB
-    }
-
-    #[test]
-    fn test_performance_hint_custom() {
-        let hint = PerformanceHint::new(4096, Some(16384));
-        assert_eq!(hint.coalescing_window(), 4096);
-        assert_eq!(hint.max_read(), Some(16384));
-    }
-
-    #[test]
-    fn test_performance_hint_no_max() {
-        let hint = PerformanceHint::new(2048, None);
-        assert_eq!(hint.coalescing_window(), 2048);
-        assert_eq!(hint.max_read(), None);
+    fn test_coalesce_config_object_storage() {
+        let config = CoalesceConfig::object_storage();
+        assert_eq!(config.distance, 1 << 20); // 1MB
+        assert_eq!(config.max_size, 16 << 20); // 16MB
     }
 
     #[tokio::test]
@@ -281,7 +335,7 @@ mod tests {
         let data = ByteBuffer::from(vec![1, 2, 3, 4, 5]);
 
         let result = data.read_at(1, 3, Alignment::none()).await.unwrap();
-        assert_eq!(result.as_ref(), &[2, 3, 4]);
+        assert_eq!(result.to_host().await.as_ref(), &[2, 3, 4]);
     }
 
     #[tokio::test]
@@ -297,7 +351,7 @@ mod tests {
         let data = Arc::new(ByteBuffer::from(vec![1, 2, 3, 4, 5]));
 
         let result = data.read_at(2, 3, Alignment::none()).await.unwrap();
-        assert_eq!(result.as_ref(), &[3, 4, 5]);
+        assert_eq!(result.to_host().await.as_ref(), &[3, 4, 5]);
 
         let size = data.size().await.unwrap();
         assert_eq!(size, 5);

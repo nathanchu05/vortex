@@ -9,6 +9,7 @@ use crate::expr::ExprVTable;
 use crate::expr::exprs::between::Between;
 use crate::expr::exprs::binary::Binary;
 use crate::expr::exprs::cast::Cast;
+use crate::expr::exprs::fill_null::FillNull;
 use crate::expr::exprs::get_item::GetItem;
 use crate::expr::exprs::is_null::IsNull;
 use crate::expr::exprs::like::Like;
@@ -36,12 +37,14 @@ impl ExprSession {
 
     /// Register an expression vtable in the session, replacing any existing vtable with the same ID.
     pub fn register(&self, expr: ExprVTable) {
-        self.registry.register(expr)
+        self.registry.register(expr.id(), expr)
     }
 
     /// Register expression vtables in the session, replacing any existing vtables with the same IDs.
     pub fn register_many(&self, exprs: impl IntoIterator<Item = ExprVTable>) {
-        self.registry.register_many(exprs);
+        for expr in exprs {
+            self.registry.register(expr.id(), expr)
+        }
     }
 }
 
@@ -50,10 +53,11 @@ impl Default for ExprSession {
         let expressions = ExprRegistry::default();
 
         // Register built-in expressions here if needed.
-        expressions.register_many([
+        for expr in [
             ExprVTable::new_static(&Between),
             ExprVTable::new_static(&Binary),
             ExprVTable::new_static(&Cast),
+            ExprVTable::new_static(&FillNull),
             ExprVTable::new_static(&GetItem),
             ExprVTable::new_static(&IsNull),
             ExprVTable::new_static(&Like),
@@ -64,7 +68,9 @@ impl Default for ExprSession {
             ExprVTable::new_static(&Pack),
             ExprVTable::new_static(&Root),
             ExprVTable::new_static(&Select),
-        ]);
+        ] {
+            expressions.register(expr.id(), expr);
+        }
 
         Self {
             registry: expressions,

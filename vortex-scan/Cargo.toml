@@ -29,6 +29,7 @@ vortex-mask = { workspace = true }
 vortex-metrics = { workspace = true }
 vortex-session = { workspace = true }
 
+async-trait = { workspace = true }
 bit-vec = { workspace = true }
 futures = { workspace = true }
 itertools = { workspace = true }
@@ -38,7 +39,7 @@ sketches-ddsketch = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-vortex-layout = { workspace = true, features = ["test-harness"] }
+vortex-layout = { workspace = true, features = ["_test-harness"] }
 
 [features]
 default = []

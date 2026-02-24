@@ -72,9 +72,6 @@ impl ComputeFnVTable for Cast {
                 return Ok(output);
             }
         }
-        if let Some(output) = array.invoke(&CAST_FN, args)? {
-            return Ok(output);
-        }
 
         // Otherwise, we fall back to the canonical implementations.
         tracing::debug!(
@@ -93,7 +90,7 @@ impl ComputeFnVTable for Cast {
             );
         }
 
-        Ok(cast(array.to_canonical().as_ref(), dtype)?.into())
+        Ok(cast(array.to_canonical()?.as_ref(), dtype)?.into())
     }
 
     fn return_dtype(&self, args: &InvocationArgs) -> VortexResult<DType> {

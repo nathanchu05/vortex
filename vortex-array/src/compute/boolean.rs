@@ -16,6 +16,7 @@ use vortex_error::vortex_err;
 
 use crate::Array;
 use crate::ArrayRef;
+use crate::arrays::ConstantVTable;
 use crate::arrow::FromArrowArray;
 use crate::arrow::IntoArrowArray;
 use crate::compute::ComputeFn;
@@ -126,10 +127,10 @@ impl ComputeFnVTable for Boolean {
     ) -> VortexResult<Output> {
         let BooleanArgs { lhs, rhs, operator } = BooleanArgs::try_from(args)?;
 
-        let rhs_is_constant = rhs.is_constant();
+        let rhs_is_constant = rhs.is::<ConstantVTable>();
 
         // If LHS is constant, then we make sure it's on the RHS.
-        if lhs.is_constant() && !rhs_is_constant {
+        if lhs.is::<ConstantVTable>() && !rhs_is_constant {
             return Ok(boolean(rhs, lhs, operator)?.into());
         }
 
@@ -144,9 +145,6 @@ impl ComputeFnVTable for Boolean {
                 return Ok(output);
             }
         }
-        if let Some(output) = lhs.invoke(&BOOLEAN_FN, args)? {
-            return Ok(output);
-        }
 
         let inverse_args = InvocationArgs {
             inputs: &[rhs.into(), lhs.into()],
@@ -156,9 +154,6 @@ impl ComputeFnVTable for Boolean {
             if let Some(output) = kernel.invoke(&inverse_args)? {
                 return Ok(output);
             }
-        }
-        if let Some(output) = rhs.invoke(&BOOLEAN_FN, &inverse_args)? {
-            return Ok(output);
         }
 
         tracing::debug!(
@@ -316,7 +311,7 @@ pub(crate) fn arrow_boolean(
         BooleanOperator::OrKleene => arrow_arith::boolean::or_kleene(&lhs, &rhs)?,
     };
 
-    Ok(ArrayRef::from_arrow(&array, nullable))
+    ArrayRef::from_arrow(&array, nullable)
 }
 
 #[cfg(test)]
@@ -338,10 +333,10 @@ mod tests {
 
         let r = r.to_bool().into_array();
 
-        let v0 = r.scalar_at(0).as_bool().value();
-        let v1 = r.scalar_at(1).as_bool().value();
-        let v2 = r.scalar_at(2).as_bool().value();
-        let v3 = r.scalar_at(3).as_bool().value();
+        let v0 = r.scalar_at(0).unwrap().as_bool().value();
+        let v1 = r.scalar_at(1).unwrap().as_bool().value();
+        let v2 = r.scalar_at(2).unwrap().as_bool().value();
+        let v3 = r.scalar_at(3).unwrap().as_bool().value();
 
         assert!(v0.unwrap());
         assert!(v1.unwrap());
@@ -358,10 +353,10 @@ mod tests {
     fn test_and(#[case] lhs: ArrayRef, #[case] rhs: ArrayRef) {
         let r = and(&lhs, &rhs).unwrap().to_bool().into_array();
 
-        let v0 = r.scalar_at(0).as_bool().value();
-        let v1 = r.scalar_at(1).as_bool().value();
-        let v2 = r.scalar_at(2).as_bool().value();
-        let v3 = r.scalar_at(3).as_bool().value();
+        let v0 = r.scalar_at(0).unwrap().as_bool().value();
+        let v1 = r.scalar_at(1).unwrap().as_bool().value();
+        let v2 = r.scalar_at(2).unwrap().as_bool().value();
+        let v3 = r.scalar_at(3).unwrap().as_bool().value();
 
         assert!(v0.unwrap());
         assert!(!v1.unwrap());

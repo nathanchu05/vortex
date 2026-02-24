@@ -23,11 +23,10 @@ use crate::ArrayRef;
 use crate::IntoArray;
 use crate::ToCanonical;
 use crate::arrays::PrimitiveVTable;
+use crate::arrays::TakeExecute;
 use crate::arrays::primitive::PrimitiveArray;
-use crate::compute::TakeKernel;
-use crate::compute::TakeKernelAdapter;
 use crate::compute::cast;
-use crate::register_kernel;
+use crate::executor::ExecutionCtx;
 use crate::validity::Validity;
 use crate::vtable::ValidityHelper;
 
@@ -81,8 +80,12 @@ impl TakeImpl for TakeKernelScalar {
     }
 }
 
-impl TakeKernel for PrimitiveVTable {
-    fn take(&self, array: &PrimitiveArray, indices: &dyn Array) -> VortexResult<ArrayRef> {
+impl TakeExecute for PrimitiveVTable {
+    fn take(
+        array: &PrimitiveArray,
+        indices: &dyn Array,
+        _ctx: &mut ExecutionCtx,
+    ) -> VortexResult<Option<ArrayRef>> {
         let DType::Primitive(ptype, null) = indices.dtype() else {
             vortex_bail!("Invalid indices dtype: {}", indices.dtype())
         };
@@ -96,11 +99,11 @@ impl TakeKernel for PrimitiveVTable {
 
         let validity = array.validity().take(unsigned_indices.as_ref())?;
         // Delegate to the best kernel based on the target CPU
-        PRIMITIVE_TAKE_KERNEL.take(array, &unsigned_indices, validity)
+        PRIMITIVE_TAKE_KERNEL
+            .take(array, &unsigned_indices, validity)
+            .map(Some)
     }
 }
-
-register_kernel!(TakeKernelAdapter(PrimitiveVTable).lift());
 
 // Compiler may see this as unused based on enabled features
 #[allow(unused)]
@@ -114,6 +117,7 @@ fn take_primitive_scalar<T: NativePType, I: IntegerPType>(array: &[T], indices: 
 mod test {
     use rstest::rstest;
     use vortex_buffer::buffer;
+    use vortex_error::VortexExpect;
     use vortex_scalar::Scalar;
 
     use crate::Array;
@@ -122,7 +126,6 @@ mod test {
     use crate::arrays::PrimitiveArray;
     use crate::arrays::primitive::compute::take::take_primitive_scalar;
     use crate::compute::conformance::take::test_take_conformance;
-    use crate::compute::take;
     use crate::validity::Validity;
 
     #[test]
@@ -142,12 +145,21 @@ mod test {
             buffer![0, 3, 4],
             Validity::Array(BoolArray::from_iter([true, true, false]).into_array()),
         );
-        let actual = take(values.as_ref(), indices.as_ref()).unwrap();
-        assert_eq!(actual.scalar_at(0), Scalar::from(Some(1)));
+        let actual = values.take(indices.to_array()).unwrap();
+        assert_eq!(
+            actual.scalar_at(0).vortex_expect("no fail"),
+            Scalar::from(Some(1))
+        );
         // position 3 is null
-        assert_eq!(actual.scalar_at(1), Scalar::null_typed::<i32>());
+        assert_eq!(
+            actual.scalar_at(1).vortex_expect("no fail"),
+            Scalar::null_native::<i32>()
+        );
         // the third index is null
-        assert_eq!(actual.scalar_at(2), Scalar::null_typed::<i32>());
+        assert_eq!(
+            actual.scalar_at(2).vortex_expect("no fail"),
+            Scalar::null_native::<i32>()
+        );
     }
 
     #[rstest]

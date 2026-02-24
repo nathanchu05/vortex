@@ -41,8 +41,8 @@ impl BetweenKernel for PrimitiveVTable {
         Ok(Some(match_each_native_ptype!(arr.ptype(), |P| {
             between_impl::<P>(
                 arr,
-                P::try_from(lower)?,
-                P::try_from(upper)?,
+                P::try_from(&lower)?,
+                P::try_from(&upper)?,
                 nullability,
                 options,
             )
@@ -108,7 +108,7 @@ where
     T: NativePType + Copy,
 {
     let slice = arr.as_slice::<T>();
-    BoolArray::from_bit_buffer(
+    BoolArray::new(
         BitBuffer::collect_bool(slice.len(), |idx| {
             // We only iterate upto arr len and |arr| == |slice|.
             let i = unsafe { *slice.get_unchecked(idx) };

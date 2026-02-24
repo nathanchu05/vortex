@@ -8,15 +8,11 @@ use itertools::Itertools;
 use vortex_dtype::DType;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
-use vortex_error::vortex_ensure;
-use vortex_scalar::Scalar;
-use vortex_vector::Datum;
-use vortex_vector::VectorOps;
-use vortex_vector::datum_matches_dtype;
 
 use crate::Array;
 use crate::ArrayRef;
 use crate::ArrayVisitor;
+use crate::Canonical;
 use crate::IntoArray;
 use crate::arrays::ConstantArray;
 use crate::arrays::ConstantVTable;
@@ -24,14 +20,13 @@ use crate::arrays::FilterArray;
 use crate::arrays::FilterVTable;
 use crate::arrays::ScalarFnArray;
 use crate::arrays::ScalarFnVTable;
+use crate::arrays::SliceReduceAdaptor;
 use crate::arrays::StructArray;
-use crate::expr::ExecutionArgs;
 use crate::expr::Pack;
 use crate::expr::ReduceCtx;
 use crate::expr::ReduceNode;
 use crate::expr::ReduceNodeRef;
 use crate::expr::ScalarFn;
-use crate::matchers::Exact;
 use crate::optimizer::rules::ArrayParentReduceRule;
 use crate::optimizer::rules::ArrayReduceRule;
 use crate::optimizer::rules::ParentRuleSet;
@@ -44,8 +39,10 @@ pub(super) const RULES: ReduceRuleSet<ScalarFnVTable> = ReduceRuleSet::new(&[
     &ScalarFnAbstractReduceRule,
 ]);
 
-pub(super) const PARENT_RULES: ParentRuleSet<ScalarFnVTable> =
-    ParentRuleSet::new(&[ParentRuleSet::lift(&ScalarFnUnaryFilterPushDownRule)]);
+pub(super) const PARENT_RULES: ParentRuleSet<ScalarFnVTable> = ParentRuleSet::new(&[
+    ParentRuleSet::lift(&ScalarFnUnaryFilterPushDownRule),
+    ParentRuleSet::lift(&SliceReduceAdaptor(ScalarFnVTable)),
+]);
 
 /// Converts a ScalarFnArray with Pack into a StructArray directly.
 #[derive(Debug)]
@@ -80,42 +77,12 @@ impl ArrayReduceRule<ScalarFnVTable> for ScalarFnConstantRule {
         if !array.children.iter().all(|c| c.is::<ConstantVTable>()) {
             return Ok(None);
         }
-
-        let input_datums: Vec<_> = array
-            .children
-            .iter()
-            .map(|c| c.as_::<ConstantVTable>().scalar().to_vector_scalar())
-            .map(Datum::Scalar)
-            .collect();
-        let input_dtypes = array.children.iter().map(|c| c.dtype().clone()).collect();
-
-        let result = array.scalar_fn.execute(ExecutionArgs {
-            datums: input_datums,
-            dtypes: input_dtypes,
-            row_count: array.len,
-            return_dtype: array.dtype.clone(),
-        })?;
-        vortex_ensure!(
-            datum_matches_dtype(&result, &array.dtype),
-            "Scalar function {} result does not match expected dtype",
-            array.scalar_fn
-        );
-
-        let result = match result {
-            Datum::Scalar(s) => s,
-            Datum::Vector(v) => {
-                tracing::info!(
-                    "Scalar function {} returned vector from execution over all scalar inputs",
-                    array.scalar_fn,
-                );
-                v.scalar_at(0)
-            }
-        };
-
-        Ok(Some(
-            ConstantArray::new(Scalar::from_vector_scalar(result, &array.dtype)?, array.len)
-                .into_array(),
-        ))
+        if array.is_empty() {
+            Ok(Some(Canonical::empty(array.dtype()).into_array()))
+        } else {
+            let result = array.scalar_at(0)?;
+            Ok(Some(ConstantArray::new(result, array.len).into_array()))
+        }
     }
 }
 
@@ -154,7 +121,10 @@ impl ReduceNode for ArrayRef {
     }
 
     fn child(&self, idx: usize) -> ReduceNodeRef {
-        Arc::new(<dyn Array>::children(self)[idx].clone())
+        Arc::new(
+            self.nth_child(idx)
+                .vortex_expect("child index out of bounds"),
+        )
     }
 
     fn child_count(&self) -> usize {
@@ -195,11 +165,7 @@ impl ReduceCtx for ArrayReduceCtx {
 struct ScalarFnUnaryFilterPushDownRule;
 
 impl ArrayParentReduceRule<ScalarFnVTable> for ScalarFnUnaryFilterPushDownRule {
-    type Parent = Exact<FilterVTable>;
-
-    fn parent(&self) -> Self::Parent {
-        Exact::from(&FilterVTable)
-    }
+    type Parent = FilterVTable;
 
     fn reduce_parent(
         &self,
@@ -235,5 +201,43 @@ impl ArrayParentReduceRule<ScalarFnVTable> for ScalarFnUnaryFilterPushDownRule {
         }
 
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use vortex_dtype::DType;
+    use vortex_dtype::Nullability;
+    use vortex_dtype::PType;
+    use vortex_error::VortexExpect;
+
+    use crate::array::IntoArray;
+    use crate::arrays::ChunkedArray;
+    use crate::arrays::ConstantArray;
+    use crate::arrays::PrimitiveArray;
+    use crate::expr::cast;
+    use crate::expr::is_null;
+    use crate::expr::root;
+
+    #[test]
+    fn test_empty_constants() {
+        let array = ChunkedArray::try_new(
+            vec![
+                ConstantArray::new(Some(1u64), 0).into_array(),
+                PrimitiveArray::from_iter(vec![2u64])
+                    .into_array()
+                    .apply(&cast(
+                        root(),
+                        DType::Primitive(PType::U64, Nullability::Nullable),
+                    ))
+                    .vortex_expect("casted"),
+            ],
+            DType::Primitive(PType::U64, Nullability::Nullable),
+        )
+        .vortex_expect("construction")
+        .to_array();
+
+        let expr = is_null(root());
+        array.apply(&expr).vortex_expect("expr evaluation");
     }
 }

@@ -8,14 +8,17 @@ use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
 use vortex_error::vortex_ensure;
+use vortex_session::VortexSession;
 
 use crate::Array;
 use crate::ArrayRef;
-use crate::Canonical;
 use crate::ExecutionCtx;
+use crate::IntoArray;
 use crate::ProstMetadata;
 use crate::arrays::ListArray;
-use crate::arrays::list::vtable::kernel::PARENT_KERNELS;
+use crate::arrays::list::compute::PARENT_KERNELS;
+use crate::arrays::list::compute::rules::PARENT_RULES;
+use crate::arrays::list_view_from_list;
 use crate::buffer::BufferHandle;
 use crate::metadata::DeserializeMetadata;
 use crate::metadata::SerializeMetadata;
@@ -23,15 +26,10 @@ use crate::serde::ArrayChildren;
 use crate::validity::Validity;
 use crate::vtable;
 use crate::vtable::ArrayId;
-use crate::vtable::ArrayVTable;
-use crate::vtable::ArrayVTableExt;
-use crate::vtable::NotSupported;
 use crate::vtable::VTable;
 use crate::vtable::ValidityVTableFromValidityHelper;
 
 mod array;
-mod canonical;
-mod kernel;
 mod operations;
 mod validity;
 mod visitor;
@@ -52,19 +50,20 @@ impl VTable for ListVTable {
     type Metadata = ProstMetadata<ListMetadata>;
 
     type ArrayVTable = Self;
-    type CanonicalVTable = Self;
     type OperationsVTable = Self;
     type ValidityVTable = ValidityVTableFromValidityHelper;
     type VisitorVTable = Self;
-    type ComputeVTable = NotSupported;
-    type EncodeVTable = NotSupported;
 
-    fn id(&self) -> ArrayId {
-        ArrayId::new_ref("vortex.list")
+    fn id(_array: &Self::Array) -> ArrayId {
+        Self::ID
     }
 
-    fn encoding(_array: &Self::Array) -> ArrayVTable {
-        ListVTable.as_vtable()
+    fn reduce_parent(
+        array: &Self::Array,
+        parent: &ArrayRef,
+        child_idx: usize,
+    ) -> VortexResult<Option<ArrayRef>> {
+        PARENT_RULES.evaluate(array, parent, child_idx)
     }
 
     fn metadata(array: &ListArray) -> VortexResult<Self::Metadata> {
@@ -78,14 +77,18 @@ impl VTable for ListVTable {
         Ok(Some(SerializeMetadata::serialize(metadata)))
     }
 
-    fn deserialize(bytes: &[u8]) -> VortexResult<Self::Metadata> {
+    fn deserialize(
+        bytes: &[u8],
+        _dtype: &DType,
+        _len: usize,
+        _session: &VortexSession,
+    ) -> VortexResult<Self::Metadata> {
         Ok(ProstMetadata(
             <ProstMetadata<ListMetadata> as DeserializeMetadata>::deserialize(bytes)?,
         ))
     }
 
     fn build(
-        &self,
         dtype: &DType,
         len: usize,
         metadata: &Self::Metadata,
@@ -144,15 +147,23 @@ impl VTable for ListVTable {
         Ok(())
     }
 
+    fn execute(array: &Self::Array, ctx: &mut ExecutionCtx) -> VortexResult<ArrayRef> {
+        Ok(list_view_from_list(array.clone(), ctx)?.into_array())
+    }
+
     fn execute_parent(
         array: &Self::Array,
         parent: &ArrayRef,
         child_idx: usize,
         ctx: &mut ExecutionCtx,
-    ) -> VortexResult<Option<Canonical>> {
+    ) -> VortexResult<Option<ArrayRef>> {
         PARENT_KERNELS.execute(array, parent, child_idx, ctx)
     }
 }
 
 #[derive(Debug)]
 pub struct ListVTable;
+
+impl ListVTable {
+    pub const ID: ArrayId = ArrayId::new_ref("vortex.list");
+}

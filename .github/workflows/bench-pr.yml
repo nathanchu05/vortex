@@ -1,4 +1,4 @@
-# Runs once when we add the `benchmark` tag to a pull request.
+# Runs all benchmarks once when we add the `action/benchmark` tag to a pull request.
 
 name: PR Benchmarks
 
@@ -24,13 +24,13 @@ jobs:
   label_trigger:
     runs-on: ubuntu-latest
     timeout-minutes: 120
-    if: ${{ contains(github.event.head_commit.message, '[benchmark]') || github.event.label.name == 'benchmark' && github.event_name == 'pull_request' }}
+    if: ${{ contains(github.event.head_commit.message, '[benchmark]') || github.event.label.name == 'action/benchmark' && github.event_name == 'pull_request' }}
     steps:
       # We remove the benchmark label first so that the workflow can be re-triggered.
       - uses: actions-ecosystem/action-remove-labels@v1
         if: ${{ github.event.pull_request.head.repo.full_name == 'vortex-data/vortex' }}
         with:
-          labels: benchmark
+          labels: action/benchmark
           fail_on_error: true
 
   bench:
@@ -42,9 +42,10 @@ jobs:
         benchmark:
           - id: random-access-bench
             name: Random Access
+            build_args: "--features lance"
           - id: compress-bench
             name: Compression
-    if: ${{ contains(github.event.head_commit.message, '[benchmark]') || github.event.label.name == 'benchmark' && github.event_name == 'pull_request' }}
+    if: ${{ contains(github.event.head_commit.message, '[benchmark]') || github.event.label.name == 'action/benchmark' && github.event_name == 'pull_request' }}
     steps:
       - uses: runs-on/action@v2
         if: github.event.pull_request.head.repo.fork == false
@@ -63,22 +64,24 @@ jobs:
           chmod +x duckdb
           echo "$PWD" >> $GITHUB_PATH
 
+      - uses: ./.github/actions/system-info
+
       - name: Build binary
         shell: bash
         env:
           RUSTFLAGS: "-C target-cpu=native -C force-frame-pointers=yes"
         run: |
-          cargo build --package ${{ matrix.benchmark.id }} --profile release_debug
+          cargo build --package ${{ matrix.benchmark.id }} --profile release_debug ${{ matrix.benchmark.build_args }}
 
       - name: Setup Polar Signals
         if: github.event.pull_request.head.repo.fork == false
-        uses: polarsignals/gh-actions-ps-profiling@v0.6.0
+        uses: polarsignals/gh-actions-ps-profiling@v0.8.1
         with:
           polarsignals_cloud_token: ${{ secrets.POLAR_SIGNALS_API_KEY }}
           labels: "branch=${{ github.ref_name }};gh_run_id=${{ github.run_id }};benchmark=${{ matrix.benchmark.id }}"
-          parca_agent_version: "0.42.0"
           project_uuid: "e5d846e1-b54c-46e7-9174-8bf055a3af56"
-          extra_args: "--off-cpu-threshold=0.001"  # Personally tuned by @brancz
+          profiling_frequency: 199
+          extra_args: "--off-cpu-threshold=0.03"  # Personally tuned by @brancz
 
       - name: Run ${{ matrix.benchmark.name }} benchmark
         shell: bash
@@ -128,6 +131,16 @@ jobs:
         uses: thollander/actions-comment-pull-request@v3
         with:
           file-path: comment.md
+          comment-tag: bench-pr-comment-${{ matrix.benchmark.id }}
+
+      - name: Comment PR on failure
+        if: failure() && inputs.mode == 'pr' && github.event.pull_request.head.repo.fork == false
+        uses: thollander/actions-comment-pull-request@v3
+        with:
+          message: |
+            # 🚨🚨🚨❌❌❌ BENCHMARK FAILED ❌❌❌🚨🚨🚨
+
+            Benchmark `${{ matrix.benchmark.name }}` failed! Check the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.
           comment-tag: bench-pr-comment-${{ matrix.benchmark.id }}
 
   sql:

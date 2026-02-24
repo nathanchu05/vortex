@@ -23,7 +23,7 @@ pub use crate::duckdb::LogicalType;
 pub use crate::duckdb::Value;
 use crate::scan::VortexTableFunction;
 
-mod convert;
+pub mod convert;
 pub mod duckdb;
 pub mod exporter;
 mod scan;
@@ -96,8 +96,13 @@ pub fn register_table_functions(conn: &Connection) -> VortexResult<()> {
 pub unsafe extern "C" fn vortex_init_rust(db: cpp::duckdb_database) {
     let database = unsafe { Database::borrow(db) };
 
+    database
+        .register_vortex_scan_replacement()
+        .vortex_expect("failed to register vortex scan replacement");
+
     let conn = database
         .connect()
+        .inspect_err(|e| println!("err {e}"))
         .vortex_expect("Failed to connect to DuckDB database");
     register_table_functions(&conn).vortex_expect("Failed to initialize Vortex extension");
 }

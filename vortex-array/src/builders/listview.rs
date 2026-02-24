@@ -281,7 +281,7 @@ impl<O: IntegerPType, S: IntegerPType> ArrayBuilder for ListViewBuilder<O, S> {
     fn append_scalar(&mut self, scalar: &Scalar) -> VortexResult<()> {
         vortex_ensure!(
             scalar.dtype() == self.dtype(),
-            "ListViewBuilder expected scalar with dtype {:?}, got {:?}",
+            "ListViewBuilder expected scalar with dtype {}, got {}",
             self.dtype(),
             scalar.dtype()
         );
@@ -300,7 +300,9 @@ impl<O: IntegerPType, S: IntegerPType> ArrayBuilder for ListViewBuilder<O, S> {
         // to manually append each scalar.
         if !listview.is_zero_copy_to_list() {
             for i in 0..listview.len() {
-                let list = listview.scalar_at(i);
+                let list = listview
+                    .scalar_at(i)
+                    .vortex_expect("scalar_at failed in extend_from_array_unchecked");
 
                 self.append_scalar(&list)
                     .vortex_expect("was unable to extend the `ListViewBuilder`")
@@ -311,10 +313,16 @@ impl<O: IntegerPType, S: IntegerPType> ArrayBuilder for ListViewBuilder<O, S> {
 
         // Otherwise, after removing any leading and trailing elements, we can simply bulk append
         // the entire array.
-        let listview = listview.rebuild(ListViewRebuildMode::MakeExact);
+        let listview = listview
+            .rebuild(ListViewRebuildMode::MakeExact)
+            .vortex_expect("ListViewArray::rebuild(MakeExact) failed in extend_from_array");
         debug_assert!(listview.is_zero_copy_to_list());
 
-        self.nulls.append_validity_mask(array.validity_mask());
+        self.nulls.append_validity_mask(
+            array
+                .validity_mask()
+                .vortex_expect("validity_mask in extend_from_array_unchecked"),
+        );
 
         // Bulk append the new elements (which should have no gaps or overlaps).
         let old_elements_len = self.elements_builder.len();
@@ -427,6 +435,8 @@ mod tests {
     use crate::IntoArray;
     use crate::array::Array;
     use crate::arrays::ListArray;
+    use crate::arrays::PrimitiveArray;
+    use crate::assert_arrays_eq;
     use crate::builders::ArrayBuilder;
     use crate::vtable::ValidityHelper;
 
@@ -475,24 +485,22 @@ mod tests {
         assert_eq!(listview.len(), 4);
 
         // Check first list: [1, 2, 3].
-        let first_list = listview.list_elements_at(0);
-        assert_eq!(first_list.len(), 3);
-        assert_eq!(first_list.scalar_at(0), 1i32.into());
-        assert_eq!(first_list.scalar_at(1), 2i32.into());
-        assert_eq!(first_list.scalar_at(2), 3i32.into());
+        assert_arrays_eq!(
+            listview.list_elements_at(0).unwrap(),
+            PrimitiveArray::from_iter([1i32, 2, 3])
+        );
 
         // Check empty list.
-        let empty_list = listview.list_elements_at(1);
-        assert_eq!(empty_list.len(), 0);
+        assert_eq!(listview.list_elements_at(1).unwrap().len(), 0);
 
         // Check null list.
-        assert!(!listview.validity().is_valid(2));
+        assert!(!listview.validity().is_valid(2).unwrap());
 
         // Check last list: [4, 5].
-        let last_list = listview.list_elements_at(3);
-        assert_eq!(last_list.len(), 2);
-        assert_eq!(last_list.scalar_at(0), 4i32.into());
-        assert_eq!(last_list.scalar_at(1), 5i32.into());
+        assert_arrays_eq!(
+            listview.list_elements_at(3).unwrap(),
+            PrimitiveArray::from_iter([4i32, 5])
+        );
     }
 
     #[test]
@@ -523,15 +531,16 @@ mod tests {
         assert_eq!(listview.len(), 2);
 
         // Verify first list: [1, 2].
-        let first = listview.list_elements_at(0);
-        assert_eq!(first.scalar_at(0), 1i32.into());
-        assert_eq!(first.scalar_at(1), 2i32.into());
+        assert_arrays_eq!(
+            listview.list_elements_at(0).unwrap(),
+            PrimitiveArray::from_iter([1i32, 2])
+        );
 
         // Verify second list: [3, 4, 5].
-        let second = listview.list_elements_at(1);
-        assert_eq!(second.scalar_at(0), 3i32.into());
-        assert_eq!(second.scalar_at(1), 4i32.into());
-        assert_eq!(second.scalar_at(2), 5i32.into());
+        assert_arrays_eq!(
+            listview.list_elements_at(1).unwrap(),
+            PrimitiveArray::from_iter([3i32, 4, 5])
+        );
 
         // Test u64 offsets with u16 sizes.
         let dtype2: Arc<DType> = Arc::new(I32.into());
@@ -551,9 +560,10 @@ mod tests {
 
         // Verify the values: [0], [10], [20], [30], [40].
         for i in 0..5i32 {
-            let list = listview2.list_elements_at(i as usize);
-            assert_eq!(list.len(), 1);
-            assert_eq!(list.scalar_at(0), (i * 10).into());
+            assert_arrays_eq!(
+                listview2.list_elements_at(i as usize).unwrap(),
+                PrimitiveArray::from_iter([i * 10])
+            );
         }
     }
 
@@ -581,18 +591,18 @@ mod tests {
         assert_eq!(listview.len(), 5);
 
         // First two are empty lists (from append_zeros).
-        assert_eq!(listview.list_elements_at(0).len(), 0);
-        assert_eq!(listview.list_elements_at(1).len(), 0);
+        assert_eq!(listview.list_elements_at(0).unwrap().len(), 0);
+        assert_eq!(listview.list_elements_at(1).unwrap().len(), 0);
 
         // Next two are nulls.
-        assert!(!listview.validity().is_valid(2));
-        assert!(!listview.validity().is_valid(3));
+        assert!(!listview.validity().is_valid(2).unwrap());
+        assert!(!listview.validity().is_valid(3).unwrap());
 
         // Last is the regular list: [10, 20].
-        let last_list = listview.list_elements_at(4);
-        assert_eq!(last_list.len(), 2);
-        assert_eq!(last_list.scalar_at(0), 10i32.into());
-        assert_eq!(last_list.scalar_at(1), 20i32.into());
+        assert_arrays_eq!(
+            listview.list_elements_at(4).unwrap(),
+            PrimitiveArray::from_iter([10i32, 20])
+        );
     }
 
     #[test]
@@ -629,25 +639,25 @@ mod tests {
 
         // Check the extended data.
         // First list: [0] (initial data).
-        let first = listview.list_elements_at(0);
-        assert_eq!(first.len(), 1);
-        assert_eq!(first.scalar_at(0), 0i32.into());
+        assert_arrays_eq!(
+            listview.list_elements_at(0).unwrap(),
+            PrimitiveArray::from_iter([0i32])
+        );
 
         // Second list: [1, 2, 3] (from source).
-        let second = listview.list_elements_at(1);
-        assert_eq!(second.len(), 3);
-        assert_eq!(second.scalar_at(0), 1i32.into());
-        assert_eq!(second.scalar_at(1), 2i32.into());
-        assert_eq!(second.scalar_at(2), 3i32.into());
+        assert_arrays_eq!(
+            listview.list_elements_at(1).unwrap(),
+            PrimitiveArray::from_iter([1i32, 2, 3])
+        );
 
         // Third list: null (from source).
-        assert!(!listview.validity().is_valid(2));
+        assert!(!listview.validity().is_valid(2).unwrap());
 
         // Fourth list: [4, 5] (from source).
-        let fourth = listview.list_elements_at(3);
-        assert_eq!(fourth.len(), 2);
-        assert_eq!(fourth.scalar_at(0), 4i32.into());
-        assert_eq!(fourth.scalar_at(1), 5i32.into());
+        assert_arrays_eq!(
+            listview.list_elements_at(3).unwrap(),
+            PrimitiveArray::from_iter([4i32, 5])
+        );
     }
 
     #[test]
@@ -674,8 +684,6 @@ mod tests {
     #[test]
     fn test_append_array_as_list() {
         use vortex_buffer::buffer;
-
-        use crate::ToCanonical;
 
         let dtype: Arc<DType> = Arc::new(I32.into());
         let mut builder =
@@ -710,16 +718,22 @@ mod tests {
         assert_eq!(listview.len(), 5);
 
         // Verify elements array: [1, 2, 3, 10, 11, 4, 5].
-        let elements = listview.elements().to_primitive();
-        assert_eq!(elements.as_slice::<i32>(), &[1, 2, 3, 10, 11, 4, 5]);
+        assert_arrays_eq!(
+            listview.elements(),
+            PrimitiveArray::from_iter([1i32, 2, 3, 10, 11, 4, 5])
+        );
 
         // Verify offsets array.
-        let offsets = listview.offsets().to_primitive();
-        assert_eq!(offsets.as_slice::<u32>(), &[0, 3, 5, 7, 7]);
+        assert_arrays_eq!(
+            listview.offsets(),
+            PrimitiveArray::from_iter([0u32, 3, 5, 7, 7])
+        );
 
         // Verify sizes array.
-        let sizes = listview.sizes().to_primitive();
-        assert_eq!(sizes.as_slice::<u32>(), &[3, 2, 2, 0, 0]);
+        assert_arrays_eq!(
+            listview.sizes(),
+            PrimitiveArray::from_iter([3u32, 2, 2, 0, 0])
+        );
 
         // Test dtype mismatch error.
         let mut builder = ListViewBuilder::<u32, u32>::with_capacity(dtype, NonNullable, 20, 10);

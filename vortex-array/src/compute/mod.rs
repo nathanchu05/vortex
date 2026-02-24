@@ -33,7 +33,6 @@ pub use nan_count::*;
 pub use numeric::*;
 use parking_lot::RwLock;
 pub use sum::*;
-pub use take::*;
 use vortex_dtype::DType;
 use vortex_error::VortexError;
 use vortex_error::VortexResult;
@@ -46,6 +45,10 @@ pub use zip::*;
 use crate::Array;
 use crate::ArrayRef;
 use crate::builders::ArrayBuilder;
+pub use crate::expr::FillNullExecuteAdaptor;
+pub use crate::expr::FillNullKernel;
+pub use crate::expr::FillNullReduce;
+pub use crate::expr::FillNullReduceAdaptor;
 
 #[cfg(feature = "arbitrary")]
 mod arbitrary;
@@ -53,7 +56,7 @@ mod between;
 mod boolean;
 mod cast;
 mod compare;
-#[cfg(feature = "test-harness")]
+#[cfg(feature = "_test-harness")]
 pub mod conformance;
 mod fill_null;
 mod filter;
@@ -67,7 +70,6 @@ mod min_max;
 mod nan_count;
 mod numeric;
 mod sum;
-mod take;
 mod zip;
 
 /// An instance of a compute function holding the implementation vtable and a set of registered
@@ -82,14 +84,12 @@ pub struct ComputeFn {
 ///
 /// Mostly useful for small benchmarks where the overhead might cause noise depending on the order of benchmarks.
 pub fn warm_up_vtables() {
-    crate::arrow::warm_up_vtable();
     #[allow(unused_qualifications)]
     between::warm_up_vtable();
     boolean::warm_up_vtable();
     cast::warm_up_vtable();
     compare::warm_up_vtable();
-    fill_null::warm_up_vtable();
-    filter::warm_up_vtable();
+
     invert::warm_up_vtable();
     is_constant::warm_up_vtable();
     is_sorted::warm_up_vtable();
@@ -100,7 +100,6 @@ pub fn warm_up_vtables() {
     nan_count::warm_up_vtable();
     numeric::warm_up_vtable();
     sum::warm_up_vtable();
-    take::warm_up_vtable();
     zip::warm_up_vtable();
 }
 
@@ -157,7 +156,7 @@ impl ComputeFn {
                 args.inputs
                     .iter()
                     .filter_map(|input| input.array())
-                    .format_with(",", |array, f| f(&array.display_tree()))
+                    .format_with(",", |array, f| f(&array.encoding_id()))
             );
         }
         if output.len() != expected_len {

@@ -73,7 +73,7 @@ impl StructBuilder {
             );
         }
 
-        if let Some(fields) = struct_scalar.fields() {
+        if let Some(fields) = struct_scalar.fields_iter() {
             for (builder, field) in self.builders.iter_mut().zip_eq(fields) {
                 builder.append_scalar(&field)?;
             }
@@ -151,34 +151,36 @@ impl ArrayBuilder for StructBuilder {
             // We push zero values into our children when appending a null in case the children are
             // themselves non-nullable.
             .for_each(|builder| builder.append_defaults(n));
-        self.nulls.append_null();
+        self.nulls.append_n_nulls(n);
     }
 
     fn append_scalar(&mut self, scalar: &Scalar) -> VortexResult<()> {
         vortex_ensure!(
             scalar.dtype() == self.dtype(),
-            "StructBuilder expected scalar with dtype {:?}, got {:?}",
+            "StructBuilder expected scalar with dtype {}, got {}",
             self.dtype(),
             scalar.dtype()
         );
 
-        let struct_scalar = StructScalar::try_from(scalar)?;
-        self.append_value(struct_scalar)
+        self.append_value(scalar.as_struct())
     }
 
     unsafe fn extend_from_array_unchecked(&mut self, array: &dyn Array) {
         let array = array.to_struct();
 
         for (a, builder) in array
-            .fields()
+            .unmasked_fields()
             .iter()
-            .cloned()
             .zip_eq(self.builders.iter_mut())
         {
-            a.append_to_builder(builder.as_mut());
+            builder.extend_from_array(a.as_ref());
         }
 
-        self.nulls.append_validity_mask(array.validity_mask());
+        self.nulls.append_validity_mask(
+            array
+                .validity_mask()
+                .vortex_expect("validity_mask in extend_from_array_unchecked"),
+        );
     }
 
     fn reserve_exact(&mut self, capacity: usize) {
@@ -244,9 +246,12 @@ mod tests {
             .append_value(Scalar::struct_(dtype.clone(), vec![1.into(), 2.into()]).as_struct())
             .unwrap();
 
+        builder.append_nulls(2);
+
         let struct_ = builder.finish();
-        assert_eq!(struct_.len(), 1);
+        assert_eq!(struct_.len(), 3);
         assert_eq!(struct_.dtype(), &dtype);
+        assert_eq!(struct_.valid_count().unwrap(), 1);
     }
 
     #[test]

@@ -3,20 +3,13 @@
 
 use std::fmt::Formatter;
 
-use arrow_ord::cmp;
 use prost::Message;
-use vortex_compute::arrow::IntoArrow;
-use vortex_compute::arrow::IntoVector;
-use vortex_compute::logical::LogicalAndKleene;
-use vortex_compute::logical::LogicalOrKleene;
 use vortex_dtype::DType;
 use vortex_error::VortexExpect;
 use vortex_error::VortexResult;
 use vortex_error::vortex_bail;
-use vortex_error::vortex_err;
 use vortex_proto::expr as pb;
-use vortex_vector::Datum;
-use vortex_vector::VectorOps;
+use vortex_session::VortexSession;
 
 use crate::ArrayRef;
 use crate::compute;
@@ -57,8 +50,12 @@ impl VTable for Binary {
         ))
     }
 
-    fn deserialize(&self, metadata: &[u8]) -> VortexResult<Self::Options> {
-        let opts = pb::BinaryOpts::decode(metadata)?;
+    fn deserialize(
+        &self,
+        _metadata: &[u8],
+        _session: &VortexSession,
+    ) -> VortexResult<Self::Options> {
+        let opts = pb::BinaryOpts::decode(_metadata)?;
         Operator::try_from(opts.op)
     }
 
@@ -105,85 +102,25 @@ impl VTable for Binary {
         Ok(DType::Bool((lhs.is_nullable() || rhs.is_nullable()).into()))
     }
 
-    fn evaluate(
-        &self,
-        operator: &Operator,
-        expr: &Expression,
-        scope: &ArrayRef,
-    ) -> VortexResult<ArrayRef> {
-        let lhs = expr.child(0).evaluate(scope)?;
-        let rhs = expr.child(1).evaluate(scope)?;
-
-        match operator {
-            Operator::Eq => compare(&lhs, &rhs, compute::Operator::Eq),
-            Operator::NotEq => compare(&lhs, &rhs, compute::Operator::NotEq),
-            Operator::Lt => compare(&lhs, &rhs, compute::Operator::Lt),
-            Operator::Lte => compare(&lhs, &rhs, compute::Operator::Lte),
-            Operator::Gt => compare(&lhs, &rhs, compute::Operator::Gt),
-            Operator::Gte => compare(&lhs, &rhs, compute::Operator::Gte),
-            Operator::And => and_kleene(&lhs, &rhs),
-            Operator::Or => or_kleene(&lhs, &rhs),
-            Operator::Add => add(&lhs, &rhs),
-            Operator::Sub => sub(&lhs, &rhs),
-            Operator::Mul => mul(&lhs, &rhs),
-            Operator::Div => div(&lhs, &rhs),
-        }
-    }
-
-    fn execute(&self, op: &Operator, args: ExecutionArgs) -> VortexResult<Datum> {
-        let [lhs, rhs]: [Datum; _] = args
-            .datums
-            .try_into()
-            .map_err(|_| vortex_err!("Wrong arg count"))?;
-
-        match op {
-            Operator::And => {
-                return Ok(LogicalAndKleene::and_kleene(&lhs.into_bool(), &rhs.into_bool()).into());
-            }
-            Operator::Or => {
-                return Ok(LogicalOrKleene::or_kleene(&lhs.into_bool(), &rhs.into_bool()).into());
-            }
-            _ => {}
-        }
-
-        let lhs = lhs.into_arrow()?;
-        let rhs = rhs.into_arrow()?;
-
-        let vector = match op {
-            Operator::Eq => cmp::eq(lhs.as_ref(), rhs.as_ref())?.into_vector()?.into(),
-            Operator::NotEq => cmp::neq(lhs.as_ref(), rhs.as_ref())?.into_vector()?.into(),
-            Operator::Gt => cmp::gt(lhs.as_ref(), rhs.as_ref())?.into_vector()?.into(),
-            Operator::Gte => cmp::gt_eq(lhs.as_ref(), rhs.as_ref())?
-                .into_vector()?
-                .into(),
-            Operator::Lt => cmp::lt(lhs.as_ref(), rhs.as_ref())?.into_vector()?.into(),
-            Operator::Lte => cmp::lt_eq(lhs.as_ref(), rhs.as_ref())?
-                .into_vector()?
-                .into(),
-
-            Operator::Add => {
-                arrow_arith::numeric::add(lhs.as_ref(), rhs.as_ref())?.into_vector()?
-            }
-            Operator::Sub => {
-                arrow_arith::numeric::sub(lhs.as_ref(), rhs.as_ref())?.into_vector()?
-            }
-            Operator::Mul => {
-                arrow_arith::numeric::mul(lhs.as_ref(), rhs.as_ref())?.into_vector()?
-            }
-            Operator::Div => {
-                arrow_arith::numeric::div(lhs.as_ref(), rhs.as_ref())?.into_vector()?
-            }
-            Operator::And | Operator::Or => {
-                unreachable!("Already dealt with above")
-            }
+    fn execute(&self, op: &Operator, args: ExecutionArgs) -> VortexResult<ArrayRef> {
+        let [lhs, rhs] = &args.inputs[..] else {
+            vortex_bail!("Wrong arg count")
         };
 
-        // If both inputs are scalars, return a scalar datum.
-        if lhs.get().1 && rhs.get().1 {
-            return Ok(Datum::Scalar(vector.scalar_at(0)));
+        match op {
+            Operator::Eq => compare(lhs, rhs, compute::Operator::Eq),
+            Operator::NotEq => compare(lhs, rhs, compute::Operator::NotEq),
+            Operator::Lt => compare(lhs, rhs, compute::Operator::Lt),
+            Operator::Lte => compare(lhs, rhs, compute::Operator::Lte),
+            Operator::Gt => compare(lhs, rhs, compute::Operator::Gt),
+            Operator::Gte => compare(lhs, rhs, compute::Operator::Gte),
+            Operator::And => and_kleene(lhs, rhs),
+            Operator::Or => or_kleene(lhs, rhs),
+            Operator::Add => add(lhs, rhs),
+            Operator::Sub => sub(lhs, rhs),
+            Operator::Mul => mul(lhs, rhs),
+            Operator::Div => div(lhs, rhs),
         }
-
-        Ok(Datum::Vector(vector))
     }
 
     fn stat_falsification(
@@ -291,6 +228,25 @@ impl VTable for Binary {
         }
     }
 
+    fn validity(
+        &self,
+        operator: &Operator,
+        expression: &Expression,
+    ) -> VortexResult<Option<Expression>> {
+        let lhs = expression.child(0).validity()?;
+        let rhs = expression.child(1).validity()?;
+
+        Ok(match operator {
+            // AND and OR are kleene logic.
+            Operator::And => None,
+            Operator::Or => None,
+            _ => {
+                // All other binary operators are null if either side is null.
+                Some(and(lhs, rhs))
+            }
+        })
+    }
+
     fn is_null_sensitive(&self, _operator: &Operator) -> bool {
         false
     }
@@ -325,11 +281,11 @@ impl VTable for Binary {
 /// # use vortex_buffer::buffer;
 /// # use vortex_array::expr::{eq, root, lit};
 /// let xs = PrimitiveArray::new(buffer![1i32, 2i32, 3i32], Validity::NonNullable);
-/// let result = eq(root(), lit(3)).evaluate(&xs.to_array()).unwrap();
+/// let result = xs.to_array().apply(&eq(root(), lit(3))).unwrap();
 ///
 /// assert_eq!(
-///     result.to_bool().bit_buffer(),
-///     BoolArray::from_iter(vec![false, false, true]).bit_buffer(),
+///     result.to_bool().to_bit_buffer(),
+///     BoolArray::from_iter(vec![false, false, true]).to_bit_buffer(),
 /// );
 /// ```
 pub fn eq(lhs: Expression, rhs: Expression) -> Expression {
@@ -344,16 +300,16 @@ pub fn eq(lhs: Expression, rhs: Expression) -> Expression {
 ///
 /// ```
 /// # use vortex_array::arrays::{BoolArray, PrimitiveArray};
-/// # use vortex_array::{IntoArray, ToCanonical};
+/// # use vortex_array::{Array, IntoArray, ToCanonical};
 /// # use vortex_array::validity::Validity;
 /// # use vortex_buffer::buffer;
 /// # use vortex_array::expr::{root, lit, not_eq};
 /// let xs = PrimitiveArray::new(buffer![1i32, 2i32, 3i32], Validity::NonNullable);
-/// let result = not_eq(root(), lit(3)).evaluate(&xs.to_array()).unwrap();
+/// let result = xs.to_array().apply(&not_eq(root(), lit(3))).unwrap();
 ///
 /// assert_eq!(
-///     result.to_bool().bit_buffer(),
-///     BoolArray::from_iter(vec![true, true, false]).bit_buffer(),
+///     result.to_bool().to_bit_buffer(),
+///     BoolArray::from_iter(vec![true, true, false]).to_bit_buffer(),
 /// );
 /// ```
 pub fn not_eq(lhs: Expression, rhs: Expression) -> Expression {
@@ -368,16 +324,16 @@ pub fn not_eq(lhs: Expression, rhs: Expression) -> Expression {
 ///
 /// ```
 /// # use vortex_array::arrays::{BoolArray, PrimitiveArray };
-/// # use vortex_array::{IntoArray, ToCanonical};
+/// # use vortex_array::{Array, IntoArray, ToCanonical};
 /// # use vortex_array::validity::Validity;
 /// # use vortex_buffer::buffer;
 /// # use vortex_array::expr::{gt_eq, root, lit};
 /// let xs = PrimitiveArray::new(buffer![1i32, 2i32, 3i32], Validity::NonNullable);
-/// let result = gt_eq(root(), lit(3)).evaluate(&xs.to_array()).unwrap();
+/// let result = xs.to_array().apply(&gt_eq(root(), lit(3))).unwrap();
 ///
 /// assert_eq!(
-///     result.to_bool().bit_buffer(),
-///     BoolArray::from_iter(vec![false, false, true]).bit_buffer(),
+///     result.to_bool().to_bit_buffer(),
+///     BoolArray::from_iter(vec![false, false, true]).to_bit_buffer(),
 /// );
 /// ```
 pub fn gt_eq(lhs: Expression, rhs: Expression) -> Expression {
@@ -392,16 +348,16 @@ pub fn gt_eq(lhs: Expression, rhs: Expression) -> Expression {
 ///
 /// ```
 /// # use vortex_array::arrays::{BoolArray, PrimitiveArray };
-/// # use vortex_array::{IntoArray, ToCanonical};
+/// # use vortex_array::{Array, IntoArray, ToCanonical};
 /// # use vortex_array::validity::Validity;
 /// # use vortex_buffer::buffer;
 /// # use vortex_array::expr::{gt, root, lit};
 /// let xs = PrimitiveArray::new(buffer![1i32, 2i32, 3i32], Validity::NonNullable);
-/// let result = gt(root(), lit(2)).evaluate(&xs.to_array()).unwrap();
+/// let result = xs.to_array().apply(&gt(root(), lit(2))).unwrap();
 ///
 /// assert_eq!(
-///     result.to_bool().bit_buffer(),
-///     BoolArray::from_iter(vec![false, false, true]).bit_buffer(),
+///     result.to_bool().to_bit_buffer(),
+///     BoolArray::from_iter(vec![false, false, true]).to_bit_buffer(),
 /// );
 /// ```
 pub fn gt(lhs: Expression, rhs: Expression) -> Expression {
@@ -416,16 +372,16 @@ pub fn gt(lhs: Expression, rhs: Expression) -> Expression {
 ///
 /// ```
 /// # use vortex_array::arrays::{BoolArray, PrimitiveArray };
-/// # use vortex_array::{IntoArray, ToCanonical};
+/// # use vortex_array::{Array, IntoArray, ToCanonical};
 /// # use vortex_array::validity::Validity;
 /// # use vortex_buffer::buffer;
 /// # use vortex_array::expr::{root, lit, lt_eq};
 /// let xs = PrimitiveArray::new(buffer![1i32, 2i32, 3i32], Validity::NonNullable);
-/// let result = lt_eq(root(), lit(2)).evaluate(&xs.to_array()).unwrap();
+/// let result = xs.to_array().apply(&lt_eq(root(), lit(2))).unwrap();
 ///
 /// assert_eq!(
-///     result.to_bool().bit_buffer(),
-///     BoolArray::from_iter(vec![true, true, false]).bit_buffer(),
+///     result.to_bool().to_bit_buffer(),
+///     BoolArray::from_iter(vec![true, true, false]).to_bit_buffer(),
 /// );
 /// ```
 pub fn lt_eq(lhs: Expression, rhs: Expression) -> Expression {
@@ -440,16 +396,16 @@ pub fn lt_eq(lhs: Expression, rhs: Expression) -> Expression {
 ///
 /// ```
 /// # use vortex_array::arrays::{BoolArray, PrimitiveArray };
-/// # use vortex_array::{IntoArray, ToCanonical};
+/// # use vortex_array::{Array, IntoArray, ToCanonical};
 /// # use vortex_array::validity::Validity;
 /// # use vortex_buffer::buffer;
 /// # use vortex_array::expr::{root, lit, lt};
 /// let xs = PrimitiveArray::new(buffer![1i32, 2i32, 3i32], Validity::NonNullable);
-/// let result = lt(root(), lit(3)).evaluate(&xs.to_array()).unwrap();
+/// let result = xs.to_array().apply(&lt(root(), lit(3))).unwrap();
 ///
 /// assert_eq!(
-///     result.to_bool().bit_buffer(),
-///     BoolArray::from_iter(vec![true, true, false]).bit_buffer(),
+///     result.to_bool().to_bit_buffer(),
+///     BoolArray::from_iter(vec![true, true, false]).to_bit_buffer(),
 /// );
 /// ```
 pub fn lt(lhs: Expression, rhs: Expression) -> Expression {
@@ -464,14 +420,14 @@ pub fn lt(lhs: Expression, rhs: Expression) -> Expression {
 ///
 /// ```
 /// # use vortex_array::arrays::BoolArray;
-/// # use vortex_array::{IntoArray, ToCanonical};
+/// # use vortex_array::{Array, IntoArray, ToCanonical};
 /// # use vortex_array::expr::{root, lit, or};
 /// let xs = BoolArray::from_iter(vec![true, false, true]);
-/// let result = or(root(), lit(false)).evaluate(&xs.to_array()).unwrap();
+/// let result = xs.to_array().apply(&or(root(), lit(false))).unwrap();
 ///
 /// assert_eq!(
-///     result.to_bool().bit_buffer(),
-///     BoolArray::from_iter(vec![true, false, true]).bit_buffer(),
+///     result.to_bool().to_bit_buffer(),
+///     BoolArray::from_iter(vec![true, false, true]).to_bit_buffer(),
 /// );
 /// ```
 pub fn or(lhs: Expression, rhs: Expression) -> Expression {
@@ -480,16 +436,18 @@ pub fn or(lhs: Expression, rhs: Expression) -> Expression {
         .vortex_expect("Failed to create Or binary expression")
 }
 
-/// Collects a list of `or`ed values into a single vortex, expr
-/// [x, y, z] => x or (y or z)
+/// Collects a list of `or`ed values into a single expression using a balanced tree.
+///
+/// This creates a balanced binary tree to avoid deep nesting that could cause
+/// stack overflow during drop or evaluation.
+///
+/// [a, b, c, d] => or(or(a, b), or(c, d))
 pub fn or_collect<I>(iter: I) -> Option<Expression>
 where
     I: IntoIterator<Item = Expression>,
-    I::IntoIter: DoubleEndedIterator<Item = Expression>,
 {
-    let mut iter = iter.into_iter();
-    let first = iter.next_back()?;
-    Some(iter.rfold(first, |acc, elem| or(elem, acc)))
+    let exprs: Vec<_> = iter.into_iter().collect();
+    balanced_reduce(exprs, or)
 }
 
 /// Create a new [`Binary`] using the [`And`](crate::expr::exprs::operators::Operator::And) operator.
@@ -498,14 +456,14 @@ where
 ///
 /// ```
 /// # use vortex_array::arrays::BoolArray;
-/// # use vortex_array::{IntoArray, ToCanonical};
+/// # use vortex_array::{Array, IntoArray, ToCanonical};
 /// # use vortex_array::expr::{and, root, lit};
 /// let xs = BoolArray::from_iter(vec![true, false, true]);
-/// let result = and(root(), lit(true)).evaluate(&xs.to_array()).unwrap();
+/// let result = xs.to_array().apply(&and(root(), lit(true))).unwrap();
 ///
 /// assert_eq!(
-///     result.to_bool().bit_buffer(),
-///     BoolArray::from_iter(vec![true, false, true]).bit_buffer(),
+///     result.to_bool().to_bit_buffer(),
+///     BoolArray::from_iter(vec![true, false, true]).to_bit_buffer(),
 /// );
 /// ```
 pub fn and(lhs: Expression, rhs: Expression) -> Expression {
@@ -514,26 +472,52 @@ pub fn and(lhs: Expression, rhs: Expression) -> Expression {
         .vortex_expect("Failed to create And binary expression")
 }
 
-/// Collects a list of `and`ed values into a single vortex, expr
-/// [x, y, z] => x and (y and z)
+/// Collects a list of `and`ed values into a single expression using a balanced tree.
+///
+/// This creates a balanced binary tree to avoid deep nesting that could cause
+/// stack overflow during drop or evaluation.
+///
+/// [a, b, c, d] => and(and(a, b), and(c, d))
 pub fn and_collect<I>(iter: I) -> Option<Expression>
 where
     I: IntoIterator<Item = Expression>,
-    I::IntoIter: DoubleEndedIterator<Item = Expression>,
 {
-    let mut iter = iter.into_iter();
-    let first = iter.next_back()?;
-    Some(iter.rfold(first, |acc, elem| and(elem, acc)))
+    let exprs: Vec<_> = iter.into_iter().collect();
+    balanced_reduce(exprs, and)
 }
 
-/// Collects a list of `and`ed values into a single vortex, expr
-/// [x, y, z] => x and (y and z)
-pub fn and_collect_right<I>(iter: I) -> Option<Expression>
+/// Helper function to reduce a list of expressions into a balanced binary tree.
+fn balanced_reduce<F>(mut exprs: Vec<Expression>, combine: F) -> Option<Expression>
 where
-    I: IntoIterator<Item = Expression>,
+    F: Fn(Expression, Expression) -> Expression + Copy,
 {
-    let iter = iter.into_iter();
-    iter.reduce(and)
+    if exprs.is_empty() {
+        return None;
+    }
+    if exprs.len() == 1 {
+        return exprs.pop();
+    }
+
+    while exprs.len() > 1 {
+        let exprs_len = exprs.len();
+
+        for target_idx in 0..(exprs.len() / 2) {
+            let item_idx = target_idx * 2;
+            let new = combine(exprs[item_idx].clone(), exprs[item_idx + 1].clone());
+            exprs[target_idx] = new;
+        }
+
+        if !exprs.len().is_multiple_of(2) {
+            // We want the odd nodes to be inside the tree and not at root
+            let lhs = exprs[(exprs.len() / 2) - 1].clone();
+            let rhs = exprs[exprs.len() - 1].clone();
+            exprs[exprs_len / 2 - 1] = combine(lhs, rhs);
+        }
+
+        exprs.truncate(exprs_len / 2);
+    }
+
+    exprs.pop()
 }
 
 /// Create a new [`Binary`] using the [`Add`](crate::expr::exprs::operators::Operator::Add) operator.
@@ -541,14 +525,12 @@ where
 /// ## Example usage
 ///
 /// ```
-/// # use vortex_array::IntoArray;
+/// # use vortex_array::{Array, IntoArray};
 /// # use vortex_array::arrow::IntoArrowArray as _;
 /// # use vortex_buffer::buffer;
 /// # use vortex_array::expr::{checked_add, lit, root};
 /// let xs = buffer![1, 2, 3].into_array();
-/// let result = checked_add(root(), lit(5))
-///     .evaluate(&xs.to_array())
-///     .unwrap();
+/// let result = xs.apply(&checked_add(root(), lit(5))).unwrap();
 ///
 /// assert_eq!(
 ///     &result.into_arrow_preferred().unwrap(),
@@ -568,38 +550,65 @@ pub fn checked_add(lhs: Expression, rhs: Expression) -> Expression {
 mod tests {
     use vortex_dtype::DType;
     use vortex_dtype::Nullability;
+    use vortex_scalar::Scalar;
 
-    use super::and;
-    use super::and_collect;
-    use super::and_collect_right;
-    use super::eq;
-    use super::gt;
-    use super::gt_eq;
-    use super::lt;
-    use super::lt_eq;
-    use super::not_eq;
-    use super::or;
+    use super::*;
+    use crate::assert_arrays_eq;
     use crate::expr::Expression;
     use crate::expr::exprs::get_item::col;
     use crate::expr::exprs::literal::lit;
     use crate::expr::test_harness;
 
     #[test]
-    fn and_collect_left_assoc() {
-        let values = vec![lit(1), lit(2), lit(3)];
-        assert_eq!(
-            Some(and(lit(1), and(lit(2), lit(3)))),
-            and_collect(values.into_iter())
-        );
+    fn and_collect_balanced() {
+        let values = vec![lit(1), lit(2), lit(3), lit(4), lit(5)];
+
+        insta::assert_snapshot!(and_collect(values.into_iter()).unwrap().display_tree(), @r"
+        vortex.binary(and)
+        ├── lhs: vortex.binary(and)
+        │   ├── lhs: vortex.literal(1i32)
+        │   └── rhs: vortex.literal(2i32)
+        └── rhs: vortex.binary(and)
+            ├── lhs: vortex.binary(and)
+            │   ├── lhs: vortex.literal(3i32)
+            │   └── rhs: vortex.literal(4i32)
+            └── rhs: vortex.literal(5i32)
+        ");
+
+        // 4 elements: and(and(1, 2), and(3, 4)) - perfectly balanced
+        let values = vec![lit(1), lit(2), lit(3), lit(4)];
+        insta::assert_snapshot!(and_collect(values.into_iter()).unwrap().display_tree(), @r"
+        vortex.binary(and)
+        ├── lhs: vortex.binary(and)
+        │   ├── lhs: vortex.literal(1i32)
+        │   └── rhs: vortex.literal(2i32)
+        └── rhs: vortex.binary(and)
+            ├── lhs: vortex.literal(3i32)
+            └── rhs: vortex.literal(4i32)
+        ");
+
+        // 1 element: just the element
+        let values = vec![lit(1)];
+        insta::assert_snapshot!(and_collect(values.into_iter()).unwrap().display_tree(), @"vortex.literal(1i32)");
+
+        // 0 elements: None
+        let values: Vec<Expression> = vec![];
+        assert!(and_collect(values.into_iter()).is_none());
     }
 
     #[test]
-    fn and_collect_right_assoc() {
-        let values = vec![lit(1), lit(2), lit(3)];
-        assert_eq!(
-            Some(and(and(lit(1), lit(2)), lit(3))),
-            and_collect_right(values.into_iter())
-        );
+    fn or_collect_balanced() {
+        // 4 elements: or(or(1, 2), or(3, 4)) - perfectly balanced
+        let values = vec![lit(1), lit(2), lit(3), lit(4)];
+        insta::assert_snapshot!(or_collect(values.into_iter()).unwrap().display_tree(), @r"
+        vortex.binary(or)
+        ├── lhs: vortex.binary(or)
+        │   ├── lhs: vortex.literal(1i32)
+        │   └── rhs: vortex.literal(2i32)
+        └── rhs: vortex.binary(or)
+            ├── lhs: vortex.literal(3i32)
+            └── rhs: vortex.literal(4i32)
+        ");
     }
 
     #[test]
@@ -664,5 +673,92 @@ mod tests {
     fn test_display_print() {
         let expr = gt(lit(1), lit(2));
         assert_eq!(format!("{expr}"), "(1i32 > 2i32)");
+    }
+
+    /// Regression test for GitHub issue #5947: struct comparison in filter expressions should work
+    /// using `make_comparator` instead of Arrow's `cmp` functions which don't support nested types.
+    #[test]
+    fn test_struct_comparison() {
+        use crate::IntoArray;
+        use crate::arrays::StructArray;
+
+        // Create a struct array with one element for testing.
+        let lhs_struct = StructArray::from_fields(&[
+            (
+                "a",
+                crate::arrays::PrimitiveArray::from_iter([1i32]).into_array(),
+            ),
+            (
+                "b",
+                crate::arrays::PrimitiveArray::from_iter([3i32]).into_array(),
+            ),
+        ])
+        .unwrap()
+        .into_array();
+
+        let rhs_struct_equal = StructArray::from_fields(&[
+            (
+                "a",
+                crate::arrays::PrimitiveArray::from_iter([1i32]).into_array(),
+            ),
+            (
+                "b",
+                crate::arrays::PrimitiveArray::from_iter([3i32]).into_array(),
+            ),
+        ])
+        .unwrap()
+        .into_array();
+
+        let rhs_struct_different = StructArray::from_fields(&[
+            (
+                "a",
+                crate::arrays::PrimitiveArray::from_iter([1i32]).into_array(),
+            ),
+            (
+                "b",
+                crate::arrays::PrimitiveArray::from_iter([4i32]).into_array(),
+            ),
+        ])
+        .unwrap()
+        .into_array();
+
+        // Test using compare compute function directly
+        let result_equal = compare(&lhs_struct, &rhs_struct_equal, compute::Operator::Eq).unwrap();
+        assert_eq!(
+            result_equal.scalar_at(0).vortex_expect("value"),
+            Scalar::bool(true, Nullability::NonNullable),
+            "Equal structs should be equal"
+        );
+
+        let result_different =
+            compare(&lhs_struct, &rhs_struct_different, compute::Operator::Eq).unwrap();
+        assert_eq!(
+            result_different.scalar_at(0).vortex_expect("value"),
+            Scalar::bool(false, Nullability::NonNullable),
+            "Different structs should not be equal"
+        );
+    }
+
+    #[test]
+    fn test_or_kleene_validity() {
+        use crate::IntoArray;
+        use crate::arrays::BoolArray;
+        use crate::arrays::StructArray;
+        use crate::expr::exprs::get_item::col;
+
+        let struct_arr = StructArray::from_fields(&[
+            ("a", BoolArray::from_iter([Some(true)]).into_array()),
+            (
+                "b",
+                BoolArray::from_iter([Option::<bool>::None]).into_array(),
+            ),
+        ])
+        .unwrap()
+        .into_array();
+
+        let expr = or(col("a"), col("b"));
+        let result = struct_arr.apply(&expr).unwrap();
+
+        assert_arrays_eq!(result, BoolArray::from_iter([Some(true)]).into_array())
     }
 }

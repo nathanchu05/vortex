@@ -118,16 +118,20 @@ impl ZoneMap {
             match stat {
                 // For stats that are associative, we can just compute them over the stat column
                 Stat::Min | Stat::Max | Stat::Sum => {
-                    if let Some(s) = array.statistics().compute_stat(stat)? {
-                        stats_set.set(stat, Precision::exact(s.into_value()))
+                    if let Some(s) = array.statistics().compute_stat(stat)?
+                        && let Some(v) = s.into_value()
+                    {
+                        stats_set.set(stat, Precision::exact(v))
                     }
                 }
                 // These stats sum up
                 Stat::NullCount | Stat::NaNCount | Stat::UncompressedSizeInBytes => {
-                    let sum = sum(&array)?
+                    if let Some(sum_value) = sum(&array)?
                         .cast(&DType::Primitive(PType::U64, Nullability::Nullable))?
-                        .into_value();
-                    stats_set.set(stat, Precision::exact(sum));
+                        .into_value()
+                    {
+                        stats_set.set(stat, Precision::exact(sum_value));
+                    }
                 }
                 // We could implement these aggregations in the future, but for now they're unused
                 Stat::IsConstant | Stat::IsSorted | Stat::IsStrictSorted => {}
@@ -138,7 +142,7 @@ impl ZoneMap {
 
     /// Returns the array for a given stat.
     pub fn get_stat(&self, stat: Stat) -> VortexResult<Option<ArrayRef>> {
-        Ok(self.array.field_by_name_opt(stat.name()).cloned())
+        Ok(self.array.unmasked_field_by_name_opt(stat.name()).cloned())
     }
 
     /// Apply a pruning predicate against the ZoneMap, yielding a mask indicating which zones can
@@ -218,7 +222,7 @@ impl StatsAccumulator {
     ///
     /// Returns `None` if none of the requested statistics can be computed, for example they are
     /// not applicable to the column's data type.
-    pub fn as_stats_table(&mut self) -> Option<ZoneMap> {
+    pub fn as_stats_table(&mut self) -> VortexResult<Option<ZoneMap>> {
         let mut names = Vec::new();
         let mut fields = Vec::new();
         let mut stats = Vec::new();
@@ -232,7 +236,7 @@ impl StatsAccumulator {
             let values = builder.finish();
 
             // We drop any all-null stats columns
-            if values.all_invalid() {
+            if values.all_invalid()? {
                 continue;
             }
 
@@ -242,14 +246,14 @@ impl StatsAccumulator {
         }
 
         if names.is_empty() {
-            return None;
+            return Ok(None);
         }
 
-        Some(ZoneMap {
+        Ok(Some(ZoneMap {
             array: StructArray::try_new(names.into(), fields, self.length, Validity::NonNullable)
                 .vortex_expect("Failed to create zone map"),
             stats: stats.into(),
-        })
+        }))
     }
 }
 
@@ -257,13 +261,13 @@ impl StatsAccumulator {
 mod tests {
     use std::sync::Arc;
 
-    use itertools::Itertools;
     use rstest::rstest;
     use vortex_array::IntoArray;
     use vortex_array::ToCanonical;
     use vortex_array::arrays::BoolArray;
     use vortex_array::arrays::PrimitiveArray;
     use vortex_array::arrays::StructArray;
+    use vortex_array::assert_arrays_eq;
     use vortex_array::builders::ArrayBuilder;
     use vortex_array::builders::VarBinViewBuilder;
     use vortex_array::expr::gt;
@@ -305,7 +309,10 @@ mod tests {
             .vortex_expect("push_chunk should succeed for test data");
         acc.push_chunk(&builder2.finish())
             .vortex_expect("push_chunk should succeed for test data");
-        let stats_table = acc.as_stats_table().vortex_expect("Must have stats table");
+        let stats_table = acc
+            .as_stats_table()
+            .unwrap()
+            .expect("Must have stats table");
         assert_eq!(
             stats_table.array.names().as_ref(),
             &[
@@ -316,12 +323,16 @@ mod tests {
             ]
         );
         assert_eq!(
-            stats_table.array.fields()[1].to_bool().bit_buffer(),
-            &BitBuffer::from(vec![false, true])
+            stats_table.array.unmasked_fields()[1]
+                .to_bool()
+                .to_bit_buffer(),
+            BitBuffer::from(vec![false, true])
         );
         assert_eq!(
-            stats_table.array.fields()[3].to_bool().bit_buffer(),
-            &BitBuffer::from(vec![true, false])
+            stats_table.array.unmasked_fields()[3]
+                .to_bool()
+                .to_bit_buffer(),
+            BitBuffer::from(vec![true, false])
         );
     }
 
@@ -331,7 +342,10 @@ mod tests {
         let mut acc = StatsAccumulator::new(array.dtype(), &[Stat::Max, Stat::Min, Stat::Sum], 12);
         acc.push_chunk(&array)
             .vortex_expect("push_chunk should succeed for test array");
-        let stats_table = acc.as_stats_table().vortex_expect("Must have stats table");
+        let stats_table = acc
+            .as_stats_table()
+            .unwrap()
+            .expect("Must have stats table");
         assert_eq!(
             stats_table.array.names().as_ref(),
             &[
@@ -343,12 +357,16 @@ mod tests {
             ]
         );
         assert_eq!(
-            stats_table.array.fields()[1].to_bool().bit_buffer(),
-            &BitBuffer::from(vec![false])
+            stats_table.array.unmasked_fields()[1]
+                .to_bool()
+                .to_bit_buffer(),
+            BitBuffer::from(vec![false])
         );
         assert_eq!(
-            stats_table.array.fields()[3].to_bool().bit_buffer(),
-            &BitBuffer::from(vec![false])
+            stats_table.array.unmasked_fields()[3]
+                .to_bool()
+                .to_bit_buffer(),
+            BitBuffer::from(vec![false])
         );
     }
 
@@ -401,9 +419,9 @@ mod tests {
         let expr = gt_eq(root(), lit(6i32));
         let (pruning_expr, _) = checked_pruning_expr(&expr, &stats).unwrap();
         let mask = zone_map.prune(&pruning_expr, &SESSION).unwrap();
-        assert_eq!(
-            mask.to_bit_buffer().into_iter().collect_vec(),
-            vec![true, false, false]
+        assert_arrays_eq!(
+            mask.into_array(),
+            BoolArray::from_iter([true, false, false])
         );
 
         // A > 5
@@ -411,9 +429,9 @@ mod tests {
         let expr = gt(root(), lit(5i32));
         let (pruning_expr, _) = checked_pruning_expr(&expr, &stats).unwrap();
         let mask = zone_map.prune(&pruning_expr, &SESSION).unwrap();
-        assert_eq!(
-            mask.to_bit_buffer().into_iter().collect_vec(),
-            vec![true, false, false]
+        assert_arrays_eq!(
+            mask.into_array(),
+            BoolArray::from_iter([true, false, false])
         );
 
         // A < 2
@@ -421,9 +439,6 @@ mod tests {
         let expr = lt(root(), lit(2i32));
         let (pruning_expr, _) = checked_pruning_expr(&expr, &stats).unwrap();
         let mask = zone_map.prune(&pruning_expr, &SESSION).unwrap();
-        assert_eq!(
-            mask.to_bit_buffer().into_iter().collect_vec(),
-            vec![false, true, true]
-        );
+        assert_arrays_eq!(mask.into_array(), BoolArray::from_iter([false, true, true]));
     }
 }

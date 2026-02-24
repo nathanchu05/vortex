@@ -160,7 +160,7 @@ impl StatsSetRef<'_> {
                     })
                     .transpose()?
             }
-            Stat::NullCount => Some(self.dyn_array_ref.invalid_count().into()),
+            Stat::NullCount => self.dyn_array_ref.invalid_count().ok().map(Into::into),
             Stat::IsConstant => {
                 if self.dyn_array_ref.is_empty() {
                     None
@@ -197,8 +197,10 @@ impl StatsSetRef<'_> {
     pub fn compute_all(&self, stats: &[Stat]) -> VortexResult<StatsSet> {
         let mut stats_set = StatsSet::default();
         for &stat in stats {
-            if let Some(s) = self.compute_stat(stat)? {
-                stats_set.set(stat, Precision::exact(s.into_value()))
+            if let Some(s) = self.compute_stat(stat)?
+                && let Some(value) = s.into_value()
+            {
+                stats_set.set(stat, Precision::exact(value));
             }
         }
         Ok(stats_set)

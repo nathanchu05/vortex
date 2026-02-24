@@ -24,15 +24,14 @@ vortex-mask = { workspace = true }
 vortex-proto = { workspace = true }
 vortex-runend = { workspace = true }
 vortex-scalar = { workspace = true }
-vortex-vector = { workspace = true }
+vortex-session = { workspace = true }
 
 [dev-dependencies]
 itertools = { workspace = true }
 rstest = { workspace = true }
-vortex-array = { path = "../../vortex-array", features = ["test-harness"] }
+vortex-array = { path = "../../vortex-array", features = ["_test-harness"] }
 vortex-file = { path = "../../vortex-file", features = ["tokio"] }
 vortex-layout = { path = "../../vortex-layout" }
-vortex-session = { path = "../../vortex-session" }
 
 [lints]
 workspace = true

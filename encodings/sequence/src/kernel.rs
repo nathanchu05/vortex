@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-use vortex_array::Canonical;
+use vortex_array::ArrayRef;
 use vortex_array::ExecutionCtx;
 use vortex_array::IntoArray;
 use vortex_array::arrays::BoolArray;
 use vortex_array::arrays::ConstantArray;
 use vortex_array::arrays::ConstantVTable;
 use vortex_array::arrays::ExactScalarFn;
+use vortex_array::arrays::FilterExecuteAdaptor;
 use vortex_array::arrays::ScalarFnArrayView;
 use vortex_array::arrays::ScalarFnVTable;
+use vortex_array::arrays::TakeExecuteAdaptor;
 use vortex_array::compute::Operator;
 use vortex_array::expr::Binary;
 use vortex_array::kernel::ExecuteParentKernel;
@@ -30,8 +32,11 @@ use crate::SequenceArray;
 use crate::SequenceVTable;
 use crate::compute::compare::find_intersection_scalar;
 
-pub(crate) const PARENT_KERNELS: ParentKernelSet<SequenceVTable> =
-    ParentKernelSet::new(&[ParentKernelSet::lift(&SequenceCompareKernel)]);
+pub(crate) const PARENT_KERNELS: ParentKernelSet<SequenceVTable> = ParentKernelSet::new(&[
+    ParentKernelSet::lift(&SequenceCompareKernel),
+    ParentKernelSet::lift(&FilterExecuteAdaptor(SequenceVTable)),
+    ParentKernelSet::lift(&TakeExecuteAdaptor(SequenceVTable)),
+]);
 
 /// Kernel to execute comparison operations directly on a sequence array.
 #[derive(Debug)]
@@ -40,17 +45,13 @@ struct SequenceCompareKernel;
 impl ExecuteParentKernel<SequenceVTable> for SequenceCompareKernel {
     type Parent = ExactScalarFn<Binary>;
 
-    fn parent(&self) -> Self::Parent {
-        ExactScalarFn::from(&Binary)
-    }
-
     fn execute_parent(
         &self,
         array: &SequenceArray,
         parent: ScalarFnArrayView<'_, Binary>,
         child_idx: usize,
         ctx: &mut ExecutionCtx,
-    ) -> VortexResult<Option<Canonical>> {
+    ) -> VortexResult<Option<ArrayRef>> {
         // Only handle comparison operators
         let Some(cmp_op) = parent.options.maybe_cmp_operator() else {
             return Ok(None);
@@ -89,8 +90,8 @@ impl ExecuteParentKernel<SequenceVTable> for SequenceCompareKernel {
             // Constant is null - result is all null for comparisons
             let nullability = array.dtype().nullability() | constant.dtype().nullability();
             let result_array =
-                ConstantArray::new(Scalar::null(DType::Bool(nullability)), array.length).to_array();
-            return Ok(Some(result_array.execute(ctx)?));
+                ConstantArray::new(Scalar::null(DType::Bool(nullability)), array.len).to_array();
+            return Ok(Some(result_array));
         };
 
         let nullability = array.dtype().nullability() | constant.dtype().nullability();
@@ -116,8 +117,8 @@ fn compare_eq_neq(
     constant: PValue,
     nullability: Nullability,
     negate: bool,
-    ctx: &mut ExecutionCtx,
-) -> VortexResult<Option<Canonical>> {
+    _ctx: &mut ExecutionCtx,
+) -> VortexResult<Option<ArrayRef>> {
     // For Eq: match_val=true, default_val=false
     // For NotEq: match_val=false, default_val=true
     let match_val = !negate;
@@ -125,25 +126,19 @@ fn compare_eq_neq(
 
     // Check if there exists an integer solution to const = base + idx * multiplier
     let Some(set_idx) =
-        find_intersection_scalar(array.base(), array.multiplier(), array.length, constant)
+        find_intersection_scalar(array.base(), array.multiplier(), array.len, constant)
     else {
-        let result_array = ConstantArray::new(
-            Scalar::new(DType::Bool(nullability), not_match_val.into()),
-            array.length,
-        )
-        .to_array();
-        return Ok(Some(result_array.execute(ctx)?));
+        return Ok(Some(
+            ConstantArray::new(Scalar::bool(not_match_val, nullability), array.len).into_array(),
+        ));
     };
     let idx = set_idx as u64;
-    let len = array.length as u64;
+    let len = array.len as u64;
 
     if len == 1 && set_idx == 0 {
-        let result_array = ConstantArray::new(
-            Scalar::new(DType::Bool(nullability), match_val.into()),
-            array.length,
-        )
-        .to_array();
-        return Ok(Some(result_array.execute(ctx)?));
+        let result_array =
+            ConstantArray::new(Scalar::bool(match_val, nullability), array.len).to_array();
+        return Ok(Some(result_array));
     }
 
     let (ends, values) = if idx == 0 {
@@ -165,8 +160,7 @@ fn compare_eq_neq(
         .into_array();
         (ends, values)
     };
-    let result_array = RunEndArray::try_new(ends, values)?.into_array();
-    Ok(Some(result_array.execute(ctx)?))
+    Ok(Some(RunEndArray::try_new(ends, values)?.into_array()))
 }
 
 fn compare_ordering(
@@ -174,42 +168,38 @@ fn compare_ordering(
     constant: PValue,
     operator: Operator,
     nullability: Nullability,
-    ctx: &mut ExecutionCtx,
-) -> VortexResult<Option<Canonical>> {
+    _ctx: &mut ExecutionCtx,
+) -> VortexResult<Option<ArrayRef>> {
     let transition = find_transition_point(
         array.base(),
         array.multiplier(),
-        array.length,
+        array.len,
         constant,
         operator,
     );
 
     let result_array = match transition {
-        Transition::AllTrue => ConstantArray::new(
-            Scalar::new(DType::Bool(nullability), true.into()),
-            array.length,
-        )
-        .to_array(),
-        Transition::AllFalse => ConstantArray::new(
-            Scalar::new(DType::Bool(nullability), false.into()),
-            array.length,
-        )
-        .to_array(),
+        Transition::AllTrue => {
+            ConstantArray::new(Scalar::bool(true, nullability), array.len).to_array()
+        }
+        Transition::AllFalse => {
+            ConstantArray::new(Scalar::bool(false, nullability), array.len).to_array()
+        }
         Transition::FalseToTrue(idx) => {
             // [0..idx) is false, [idx..len) is true
-            let ends = buffer![idx as u64, array.length as u64].into_array();
+            let ends = buffer![idx as u64, array.len as u64].into_array();
             let values = BoolArray::new(bitbuffer![false, true], nullability.into()).into_array();
             RunEndArray::try_new(ends, values)?.into_array()
         }
         Transition::TrueToFalse(idx) => {
             // [0..idx) is true, [idx..len) is false
-            let ends = buffer![idx as u64, array.length as u64].into_array();
+            let ends = buffer![idx as u64, array.len as u64].into_array();
             let values = BoolArray::new(bitbuffer![true, false], nullability.into()).into_array();
             RunEndArray::try_new(ends, values)?.into_array()
         }
     };
 
-    Ok(Some(result_array.execute(ctx)?))
+    Ok(Some(result_array))
 }
 
 enum Transition {
@@ -345,7 +335,7 @@ mod tests {
         let bool_result = result.to_bool();
 
         let expected = BitBuffer::from(vec![false]);
-        assert_eq!(bool_result.bit_buffer(), &expected);
+        assert_eq!(bool_result.to_bit_buffer(), expected);
 
         let compare_array = Binary.try_new_array(len, ExprOperator::Eq, [seq, constant])?;
 
@@ -353,7 +343,7 @@ mod tests {
         let bool_result = result.to_bool();
 
         let expected = BitBuffer::from(vec![true]);
-        assert_eq!(bool_result.bit_buffer(), &expected);
+        assert_eq!(bool_result.to_bit_buffer(), expected);
         Ok(())
     }
 
@@ -361,10 +351,11 @@ mod tests {
     fn test_sequence_gte_constant() -> VortexResult<()> {
         let seq = SequenceArray::typed_new(0i64, 1, NonNullable, 10)?.to_array();
         let constant = ConstantArray::new(
-            Scalar::new(
+            Scalar::try_new(
                 DType::Primitive(PType::I64, Nullability::Nullable),
-                5i64.into(),
-            ),
+                Some(5i64.into()),
+            )
+            .unwrap(),
             10,
         )
         .to_array();
@@ -397,7 +388,7 @@ mod tests {
         let expected = BitBuffer::from(vec![
             true, true, true, true, true, false, false, false, false, false,
         ]);
-        assert_eq!(bool_result.bit_buffer(), &expected);
+        assert_eq!(bool_result.to_bit_buffer(), expected);
         Ok(())
     }
 
@@ -415,7 +406,7 @@ mod tests {
         let expected = BitBuffer::from(vec![
             true, true, true, true, true, true, false, false, false, false,
         ]);
-        assert_eq!(bool_result.bit_buffer(), &expected);
+        assert_eq!(bool_result.to_bit_buffer(), expected);
         Ok(())
     }
 
@@ -433,7 +424,7 @@ mod tests {
         let expected = BitBuffer::from(vec![
             false, false, false, false, false, false, true, true, true, true,
         ]);
-        assert_eq!(bool_result.bit_buffer(), &expected);
+        assert_eq!(bool_result.to_bit_buffer(), expected);
         Ok(())
     }
 
@@ -452,7 +443,7 @@ mod tests {
         let expected = BitBuffer::from(vec![
             true, true, true, true, true, true, false, false, false, false,
         ]);
-        assert_eq!(bool_result.bit_buffer(), &expected);
+        assert_eq!(bool_result.to_bit_buffer(), expected);
         Ok(())
     }
 
@@ -469,7 +460,7 @@ mod tests {
         let expected = BitBuffer::from(vec![
             false, false, false, false, false, true, false, false, false, false,
         ]);
-        assert_eq!(bool_result.bit_buffer(), &expected);
+        assert_eq!(bool_result.to_bit_buffer(), expected);
         Ok(())
     }
 
@@ -486,7 +477,7 @@ mod tests {
         let expected = BitBuffer::from(vec![
             true, true, true, true, true, false, true, true, true, true,
         ]);
-        assert_eq!(bool_result.bit_buffer(), &expected);
+        assert_eq!(bool_result.to_bit_buffer(), expected);
         Ok(())
     }
 
@@ -501,7 +492,7 @@ mod tests {
         let bool_result = result.to_bool();
 
         let expected = BitBuffer::from(vec![true, true, true, true, true]);
-        assert_eq!(bool_result.bit_buffer(), &expected);
+        assert_eq!(bool_result.to_bit_buffer(), expected);
         Ok(())
     }
 
@@ -516,7 +507,7 @@ mod tests {
         let bool_result = result.to_bool();
 
         let expected = BitBuffer::from(vec![false, false, false, false, false]);
-        assert_eq!(bool_result.bit_buffer(), &expected);
+        assert_eq!(bool_result.to_bit_buffer(), expected);
         Ok(())
     }
 
@@ -535,7 +526,7 @@ mod tests {
         let expected = BitBuffer::from(vec![
             false, false, false, false, false, true, true, true, true, true,
         ]);
-        assert_eq!(bool_result.bit_buffer(), &expected);
+        assert_eq!(bool_result.to_bit_buffer(), expected);
         Ok(())
     }
 
@@ -552,7 +543,7 @@ mod tests {
 
         // 14 is at index 3: (14 - 5) / 3 = 3
         let expected = BitBuffer::from(vec![false, false, false, true, false, false, false, false]);
-        assert_eq!(bool_result.bit_buffer(), &expected);
+        assert_eq!(bool_result.to_bit_buffer(), expected);
         Ok(())
     }
 
@@ -571,7 +562,7 @@ mod tests {
         let expected = BitBuffer::from(vec![
             false, false, false, false, false, false, true, true, true, true,
         ]);
-        assert_eq!(bool_result.bit_buffer(), &expected);
+        assert_eq!(bool_result.to_bit_buffer(), expected);
         Ok(())
     }
 }
